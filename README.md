@@ -141,7 +141,7 @@ Then restart:
 
 ## Adding other providers
 
-LLMRouter uses LiteLLM under the hood, which supports 100+ providers. To add a new one (e.g. Kimi, Qwen, Grok), you need to edit two files:
+LLMRouter uses LiteLLM under the hood, which supports 100+ providers. To add a new one (e.g. Claude, Kimi, Qwen, Grok), you need to edit two files:
 
 ### 1. Add the model to `config.yaml`
 
@@ -150,6 +150,12 @@ Each entry maps an alias to a real model via environment variables:
 ```yaml
 model_list:
   # ... existing entries ...
+
+  # Example: Claude via Anthropic (Anthropic-compatible)
+  - model_name: claude-sonnet
+    litellm_params:
+      model: os.environ/CLAUDE_MODEL
+      api_key: os.environ/CLAUDE_API_KEY
 
   # Example: Qwen via Alibaba Cloud (OpenAI-compatible)
   - model_name: qwen-coder
@@ -176,6 +182,11 @@ model_list:
 ### 2. Add the variables to `.env`
 
 ```bash
+# --- Claude (Anthropic) ---
+# No api_base needed — LiteLLM uses the official Anthropic endpoint.
+CLAUDE_API_KEY=your-anthropic-api-key
+CLAUDE_MODEL=anthropic/claude-sonnet-4-6
+
 # --- Qwen (Alibaba Cloud) ---
 QWEN_API_KEY=your-qwen-api-key
 QWEN_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -221,10 +232,13 @@ These map to `model_name` entries in `config.yaml` and override the defaults.
 
 LiteLLM uses a `provider/model` prefix to route to the right API. Common patterns:
 
-| Provider | `api_base` | `model` value |
-|----------|-----------|---------------|
+| Provider type | `api_base` | `model` value |
+|--------------|-----------|---------------|
 | OpenAI-compatible | provider's `/v1` endpoint | `openai/model-name` |
 | Anthropic-compatible | provider's API endpoint | `anthropic/model-name` |
+| Anthropic (official) | not needed | `anthropic/model-name` |
+
+Key difference: Anthropic-native providers don't need `api_base` — LiteLLM sends requests directly to `api.anthropic.com`. OpenAI-compatible providers need `api_base` pointing to their `/v1` endpoint.
 
 Check [LiteLLM's provider docs](https://docs.litellm.ai/docs/providers) for the correct prefix and endpoint for each provider.
 
