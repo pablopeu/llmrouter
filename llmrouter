@@ -2,7 +2,8 @@
 # llmrouter: helper para manejar el router local.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 COMMAND="${1:-status}"
 if [ "$#" -gt 0 ]; then
     shift
@@ -25,10 +26,10 @@ case "$COMMAND" in
         exec "$SCRIPT_DIR/test-router.sh" "$@"
         ;;
     claude)
-        exec "$SCRIPT_DIR/llmrouter-claude" "$@"
+        exec "$SCRIPT_DIR/claude-mix" "$@"
         ;;
     codex)
-        exec "$SCRIPT_DIR/llmrouter-codex" "$@"
+        exec "$SCRIPT_DIR/codex-mix" "$@"
         ;;
     *)
         cat >&2 <<'EOF'

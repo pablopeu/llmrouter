@@ -93,15 +93,13 @@ systemctl --user enable --now llmrouter
 Launch Claude Code through the router:
 
 ```bash
-llmrouter-claude
-# or: clauder
+clauder
 ```
 
 Launch Codex CLI through the router:
 
 ```bash
-llmrouter-codex
-# or: codexr
+codexr
 ```
 
 General helper:
@@ -113,8 +111,6 @@ llmrouter claude
 llmrouter codex
 ```
 
-Legacy commands `claude-mix` and `codex-mix` are also available for backward compatibility.
-
 ## Commands
 
 | Command | Description |
@@ -124,10 +120,8 @@ Legacy commands `claude-mix` and `codex-mix` are also available for backward com
 | `llmrouter restart` | Restart both processes |
 | `llmrouter status` | Show status and health checks |
 | `llmrouter test` | Test models and Codex adapter |
-| `llmrouter-claude` | Launch Claude Code pointed at the router |
-| `llmrouter-codex` | Launch Codex CLI pointed at the router |
-| `clauder` | Shortcut for `llmrouter-claude` |
-| `codexr` | Shortcut for `llmrouter-codex` |
+| `clauder` | Launch Claude Code pointed at the router |
+| `codexr` | Launch Codex CLI pointed at the router |
 
 ## Changing models
 
@@ -144,6 +138,95 @@ Then restart:
 ```bash
 ~/llmrouter/restart-router.sh
 ```
+
+## Adding other providers
+
+LLMRouter uses LiteLLM under the hood, which supports 100+ providers. To add a new one (e.g. Kimi, Qwen, Grok), you need to edit two files:
+
+### 1. Add the model to `config.yaml`
+
+Each entry maps an alias to a real model via environment variables:
+
+```yaml
+model_list:
+  # ... existing entries ...
+
+  # Example: Qwen via Alibaba Cloud (OpenAI-compatible)
+  - model_name: qwen-coder
+    litellm_params:
+      model: os.environ/QWEN_MODEL
+      api_key: os.environ/QWEN_API_KEY
+      api_base: os.environ/QWEN_API_BASE
+
+  # Example: Grok via xAI (OpenAI-compatible)
+  - model_name: grok
+    litellm_params:
+      model: os.environ/GROK_MODEL
+      api_key: os.environ/GROK_API_KEY
+      api_base: os.environ/GROK_API_BASE
+
+  # Example: Kimi via Moonshot (OpenAI-compatible)
+  - model_name: kimi
+    litellm_params:
+      model: os.environ/KIMI_MODEL
+      api_key: os.environ/KIMI_API_KEY
+      api_base: os.environ/KIMI_API_BASE
+```
+
+### 2. Add the variables to `.env`
+
+```bash
+# --- Qwen (Alibaba Cloud) ---
+QWEN_API_KEY=your-qwen-api-key
+QWEN_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_MODEL=openai/qwen-coder-plus-latest
+
+# --- Grok (xAI) ---
+GROK_API_KEY=your-grok-api-key
+GROK_API_BASE=https://api.x.ai/v1
+GROK_MODEL=openai/grok-4
+
+# --- Kimi (Moonshot) ---
+KIMI_API_KEY=your-kimi-api-key
+KIMI_API_BASE=https://api.moonshot.cn/v1
+KIMI_MODEL=openai/moonshot-v1-auto
+```
+
+### 3. Restart and use
+
+```bash
+~/llmrouter/restart-router.sh
+```
+
+Then use the alias as your default model.
+
+For **Codex CLI**, set in `.env`:
+
+```bash
+CODEX_DEFAULT_MODEL=qwen-coder
+```
+
+For **Claude Code**, set in `.env`:
+
+```bash
+CLAUDE_SONNET_MODEL=qwen-coder
+CLAUDE_OPUS_MODEL=qwen-coder
+CLAUDE_HAIKU_MODEL=deepseek-haiku
+CLAUDE_SUBAGENT_MODEL=deepseek-haiku
+```
+
+These map to `model_name` entries in `config.yaml` and override the defaults.
+
+### Model name format
+
+LiteLLM uses a `provider/model` prefix to route to the right API. Common patterns:
+
+| Provider | `api_base` | `model` value |
+|----------|-----------|---------------|
+| OpenAI-compatible | provider's `/v1` endpoint | `openai/model-name` |
+| Anthropic-compatible | provider's API endpoint | `anthropic/model-name` |
+
+Check [LiteLLM's provider docs](https://docs.litellm.ai/docs/providers) for the correct prefix and endpoint for each provider.
 
 ## Troubleshooting
 
@@ -194,7 +277,7 @@ tail -f ~/llmrouter/logs/codex-adapter.log
 systemctl --user disable llmrouter 2>/dev/null || true
 rm -f ~/.config/systemd/user/llmrouter.service
 systemctl --user daemon-reload 2>/dev/null || true
-rm -f ~/.local/bin/llmrouter ~/.local/bin/llmrouter-claude ~/.local/bin/llmrouter-codex
-rm -f ~/.local/bin/claude-mix ~/.local/bin/codex-mix ~/.local/bin/codexr ~/.local/bin/clauder
+rm -f ~/.local/bin/llmrouter ~/.local/bin/claude-mix ~/.local/bin/codex-mix
+rm -f ~/.local/bin/codexr ~/.local/bin/clauder
 rm -rf ~/llmrouter
 ```

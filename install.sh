@@ -58,7 +58,7 @@ if [ -z "$TARGET_BIN" ]; then
     warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-for command_name in llmrouter llmrouter-claude llmrouter-codex claude-mix codex-mix codexr clauder; do
+for command_name in llmrouter claude-mix codex-mix codexr clauder; do
     if [ -L "$TARGET_BIN/$command_name" ] || [ -f "$TARGET_BIN/$command_name" ]; then
         info "$command_name ya existe en $TARGET_BIN, actualizando symlink."
         rm -f "$TARGET_BIN/$command_name"
