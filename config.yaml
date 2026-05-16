@@ -1,0 +1,35 @@
+# LiteLLM Proxy config para LLMRouter
+# Las claves y modelos se cargan desde .env via os.environ
+
+model_list:
+  # Z.AI sonnet alias - via Anthropic-compatible endpoint
+  - model_name: zai-sonnet
+    litellm_params:
+      model: os.environ/ZAI_MODEL_FOR_SONNET
+      api_key: os.environ/ZAI_API_KEY
+      api_base: os.environ/ZAI_API_BASE
+
+  # DeepSeek opus alias - via OpenAI-compatible endpoint
+  - model_name: deepseek-opus
+    litellm_params:
+      model: os.environ/DEEPSEEK_MODEL_FOR_OPUS
+      api_key: os.environ/DEEPSEEK_API_KEY
+      api_base: os.environ/DEEPSEEK_API_BASE
+
+  # DeepSeek haiku alias - via OpenAI-compatible endpoint
+  - model_name: deepseek-haiku
+    litellm_params:
+      model: os.environ/DEEPSEEK_MODEL_FOR_HAIKU
+      api_key: os.environ/DEEPSEEK_API_KEY
+      api_base: os.environ/DEEPSEEK_API_BASE
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+
+server_settings:
+  host: os.environ/ROUTER_HOST
+  port: os.environ/ROUTER_PORT

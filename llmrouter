@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# llmrouter: helper para manejar el router local.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMAND="${1:-status}"
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+case "$COMMAND" in
+    start)
+        exec "$SCRIPT_DIR/start-router.sh" "$@"
+        ;;
+    stop)
+        exec "$SCRIPT_DIR/stop-router.sh" "$@"
+        ;;
+    restart)
+        exec "$SCRIPT_DIR/restart-router.sh" "$@"
+        ;;
+    status)
+        exec "$SCRIPT_DIR/status-router.sh" "$@"
+        ;;
+    test)
+        exec "$SCRIPT_DIR/test-router.sh" "$@"
+        ;;
+    claude)
+        exec "$SCRIPT_DIR/llmrouter-claude" "$@"
+        ;;
+    codex)
+        exec "$SCRIPT_DIR/llmrouter-codex" "$@"
+        ;;
+    *)
+        cat >&2 <<'EOF'
+Uso: llmrouter [start|stop|restart|status|test|claude|codex]
+EOF
+        exit 2
+        ;;
+esac
