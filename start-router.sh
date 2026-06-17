@@ -2,12 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTENV="$SCRIPT_DIR/.env"
+MODELS_YAML="$SCRIPT_DIR/models.yaml"
 VENV_DIR="$SCRIPT_DIR/.venv"
+GENERATOR="$SCRIPT_DIR/generate-configs.py"
 CONFIG="$SCRIPT_DIR/config.yaml"
+ROUTER_ENV="$SCRIPT_DIR/router.env"
 LOG_DIR="$SCRIPT_DIR/logs"
+DATA_DIR="$SCRIPT_DIR/data"
 PID_FILE="$SCRIPT_DIR/router.pid"
-ADAPTER_PID_FILE="$SCRIPT_DIR/codex-adapter.pid"
+MOON_PID_FILE="$SCRIPT_DIR/moonbridge.pid"
+MOON_CONFIG="$SCRIPT_DIR/moonbridge-config.yml"
+MOON_BIN="$SCRIPT_DIR/moonbridge"
+PY="$VENV_DIR/bin/python"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,42 +24,27 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
-# --- cargar .env ---
-if [ ! -f "$DOTENV" ]; then
-    error "No existe $DOTENV"
-    error "Copia .env.example a .env y completa tus API keys."
+# --- models.yaml ---
+if [ ! -f "$MODELS_YAML" ]; then
+    error "No existe $MODELS_YAML"
+    error "Copia models.yaml.example a models.yaml y completa tus claves."
     exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-source "$DOTENV"
-set +a
-
-# --- validar claves ---
-MISSING=0
-for var in ZAI_API_KEY DEEPSEEK_API_KEY LITELLM_MASTER_KEY; do
-    VAL="${!var:-}"
-    if [ -z "$VAL" ] || [[ "$VAL" == tu-api-key-* ]] || [[ "$VAL" == *change-me* ]]; then
-        error "$var no esta configurada. Edita $DOTENV"
-        MISSING=1
-    fi
-done
-
-if [ "$MISSING" = "1" ]; then
-    error "Faltan claves. No se arranca el router."
+# --- venv + generador ---
+if [ ! -x "$PY" ]; then
+    error "No se encontro python del venv en $PY"
+    error "Ejecuta install.sh primero."
+    exit 1
+fi
+if [ ! -f "$GENERATOR" ]; then
+    error "No se encontro el generador $GENERATOR"
     exit 1
 fi
 
-# --- defaults ---
-: "${ROUTER_HOST:=127.0.0.1}"
-: "${ROUTER_PORT:=4000}"
-: "${CODEX_ADAPTER_HOST:=$ROUTER_HOST}"
-: "${CODEX_ADAPTER_PORT:=4001}"
-
-# --- verificar venv ---
-if [ ! -d "$VENV_DIR" ]; then
-    error "No existe el virtualenv en $VENV_DIR"
+# --- Moon Bridge ---
+if [ ! -x "$MOON_BIN" ]; then
+    error "Moon Bridge no encontrado en $MOON_BIN"
     error "Ejecuta install.sh primero."
     exit 1
 fi
@@ -65,8 +56,30 @@ if [ ! -x "$LITELLM_BIN" ]; then
     exit 1
 fi
 
-# --- log dir ---
-mkdir -p "$LOG_DIR"
+# --- log y data dirs ---
+mkdir -p "$LOG_DIR" "$DATA_DIR"
+
+# --- generar config.yaml, moonbridge-config.yml y router.env desde models.yaml ---
+info "Generando configs desde $MODELS_YAML ..."
+"$PY" "$GENERATOR" \
+    --models "$MODELS_YAML" \
+    --config "$CONFIG" \
+    --moon "$MOON_CONFIG" \
+    --router-env "$ROUTER_ENV" \
+    --data-dir "$DATA_DIR"
+
+# --- cargar router.env ---
+set -a
+# shellcheck disable=SC1090
+source "$ROUTER_ENV"
+set +a
+
+: "${ROUTER_HOST:=127.0.0.1}"
+: "${ROUTER_PORT:=4000}"
+: "${MOONBRIDGE_HOST:=$ROUTER_HOST}"
+: "${MOONBRIDGE_PORT:=4001}"
+: "${LITELLM_MASTER_KEY:=}"
+: "${CODEX_DEFAULT_MODEL:=sonnet}"
 
 is_listening() {
     local port="$1"
@@ -107,18 +120,31 @@ else
     info "Router arrancado (PID $(cat "$PID_FILE")) en http://${ROUTER_HOST}:${ROUTER_PORT}"
 fi
 
-# --- arrancar adaptador para Codex ---
-if is_listening "$CODEX_ADAPTER_PORT"; then
-    if [ -f "$ADAPTER_PID_FILE" ] && kill -0 "$(cat "$ADAPTER_PID_FILE")" 2>/dev/null; then
-        warn "Adaptador Codex ya corriendo (PID $(cat "$ADAPTER_PID_FILE")) en puerto $CODEX_ADAPTER_PORT."
+# --- generar models_catalog.json para Codex ---
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$CODEX_HOME"
+info "Generando models_catalog.json en $CODEX_HOME ..."
+"$MOON_BIN" \
+    --config "$MOON_CONFIG" \
+    --codex-home "$CODEX_HOME" \
+    --codex-base-url "http://${MOONBRIDGE_HOST}:${MOONBRIDGE_PORT}/v1" \
+    --print-codex-config "$CODEX_DEFAULT_MODEL" \
+    > /dev/null 2>&1
+info "models_catalog.json generado."
+
+# --- arrancar Moon Bridge para Codex ---
+if is_listening "$MOONBRIDGE_PORT"; then
+    if [ -f "$MOON_PID_FILE" ] && kill -0 "$(cat "$MOON_PID_FILE")" 2>/dev/null; then
+        warn "Moon Bridge ya corriendo (PID $(cat "$MOON_PID_FILE")) en puerto $MOONBRIDGE_PORT."
     else
-        warn "Puerto $CODEX_ADAPTER_PORT ya esta escuchando; asumo que el adaptador Codex esta activo."
+        warn "Puerto $MOONBRIDGE_PORT ya esta escuchando; asumo que Moon Bridge esta activo."
     fi
 else
-    info "Arrancando adaptador Codex en http://${CODEX_ADAPTER_HOST}:${CODEX_ADAPTER_PORT} ..."
-    nohup setsid "$VENV_DIR/bin/python" "$SCRIPT_DIR/codex-adapter.py" \
-        > "$LOG_DIR/codex-adapter.log" 2>&1 &
-    echo $! > "$ADAPTER_PID_FILE"
-    wait_for_port "$CODEX_ADAPTER_PORT" "Adaptador Codex" "$LOG_DIR/codex-adapter.log"
-    info "Adaptador Codex arrancado (PID $(cat "$ADAPTER_PID_FILE")) en http://${CODEX_ADAPTER_HOST}:${CODEX_ADAPTER_PORT}"
+    info "Arrancando Moon Bridge en http://${MOONBRIDGE_HOST}:${MOONBRIDGE_PORT} ..."
+    nohup setsid "$MOON_BIN" \
+        --config "$MOON_CONFIG" \
+        > "$LOG_DIR/moonbridge.log" 2>&1 &
+    echo $! > "$MOON_PID_FILE"
+    wait_for_port "$MOONBRIDGE_PORT" "Moon Bridge" "$LOG_DIR/moonbridge.log"
+    info "Moon Bridge arrancado (PID $(cat "$MOON_PID_FILE")) en http://${MOONBRIDGE_HOST}:${MOONBRIDGE_PORT}"
 fi

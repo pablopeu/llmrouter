@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# codex-mix: Lanza OpenAI Codex CLI apuntando al router local.
+# codex-mix: Lanza OpenAI Codex CLI apuntando a Moon Bridge (Codex -> Anthropic).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTENV="$SCRIPT_DIR/.env"
+MODELS_YAML="$SCRIPT_DIR/models.yaml"
+ROUTER_ENV="$SCRIPT_DIR/router.env"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -14,34 +15,49 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
-if [ ! -f "$DOTENV" ]; then
-    error "No existe $DOTENV"
+if [ ! -f "$MODELS_YAML" ]; then
+    error "No existe $MODELS_YAML"
     error "Ejecuta $SCRIPT_DIR/install.sh primero."
     exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-source "$DOTENV"
-set +a
+if [ -f "$ROUTER_ENV" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ROUTER_ENV"
+    set +a
+fi
 
 : "${ROUTER_HOST:=127.0.0.1}"
 : "${ROUTER_PORT:=4000}"
-: "${CODEX_ADAPTER_HOST:=$ROUTER_HOST}"
-: "${CODEX_ADAPTER_PORT:=4001}"
-: "${CODEX_DEFAULT_MODEL:=deepseek-opus}"
-: "${CODEX_REASONING_EFFORT:=low}"
+: "${MOONBRIDGE_HOST:=$ROUTER_HOST}"
+: "${MOONBRIDGE_PORT:=4001}"
+: "${CODEX_DEFAULT_MODEL:=sonnet}"
+: "${CODEX_REASONING_EFFORT:=xhigh}"
 : "${LITELLM_MASTER_KEY:=}"
 
-if [ -z "$LITELLM_MASTER_KEY" ] || [[ "$LITELLM_MASTER_KEY" == *change-me* ]]; then
-    error "LITELLM_MASTER_KEY no configurada en $DOTENV"
-    exit 1
+# Verificar que Moon Bridge y LiteLLM esten corriendo
+if [ -z "$LITELLM_MASTER_KEY" ] || \
+   ! ss -tlnp 2>/dev/null | grep -q ":${ROUTER_PORT} " || \
+   ! ss -tlnp 2>/dev/null | grep -q ":${MOONBRIDGE_PORT} "; then
+    warn "Router o Moon Bridge no estan corriendo. Intentando arrancar ..."
+    "$SCRIPT_DIR/start-router.sh"
+    set -a
+    # shellcheck disable=SC1090
+    source "$ROUTER_ENV"
+    set +a
+    : "${ROUTER_HOST:=127.0.0.1}"
+    : "${ROUTER_PORT:=4000}"
+    : "${MOONBRIDGE_HOST:=$ROUTER_HOST}"
+    : "${MOONBRIDGE_PORT:=4001}"
+    : "${CODEX_DEFAULT_MODEL:=sonnet}"
+    : "${CODEX_REASONING_EFFORT:=xhigh}"
+    : "${LITELLM_MASTER_KEY:=}"
 fi
 
-if ! ss -tlnp 2>/dev/null | grep -q ":${ROUTER_PORT} " || \
-   ! ss -tlnp 2>/dev/null | grep -q ":${CODEX_ADAPTER_PORT} "; then
-    warn "Router o adaptador Codex no estan corriendo. Intentando arrancar ..."
-    "$SCRIPT_DIR/start-router.sh"
+if [ -z "$LITELLM_MASTER_KEY" ]; then
+    error "No se pudo determinar LITELLM_MASTER_KEY. Revisa $MODELS_YAML y arranca el router."
+    exit 1
 fi
 
 if ! command -v codex &>/dev/null; then
@@ -50,20 +66,19 @@ if ! command -v codex &>/dev/null; then
     exit 1
 fi
 
-CODEX_BASE_URL="http://${CODEX_ADAPTER_HOST}:${CODEX_ADAPTER_PORT}/v1"
+CODEX_BASE_URL="http://${MOONBRIDGE_HOST}:${MOONBRIDGE_PORT}/v1"
 
 info "CODEX_BASE_URL=$CODEX_BASE_URL"
-info "Modelo default: ${CODEX_DEFAULT_MODEL}"
+info "Modelo default: ${CODEX_DEFAULT_MODEL} (tier, ver $MODELS_YAML)"
 echo ""
 
-export OPENAI_BASE_URL="$CODEX_BASE_URL"
-export OPENAI_API_KEY="$LITELLM_MASTER_KEY"
+export API_BASE_URL="$CODEX_BASE_URL"
+export LLMROUTER_API_KEY="$LITELLM_MASTER_KEY"
 
 COMMON_ARGS=(
-    --disable image_generation \
-    -m "$CODEX_DEFAULT_MODEL" \
-    -c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"" \
-    -c 'model_reasoning_summary="none"'
+    --disable image_generation
+    -m "$CODEX_DEFAULT_MODEL"
+    -c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\""
 )
 
 if [ "$#" -gt 0 ]; then

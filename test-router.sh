@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTENV="$SCRIPT_DIR/.env"
+ROUTER_ENV="$SCRIPT_DIR/router.env"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -14,22 +14,23 @@ warn()  { echo -e "${YELLOW}[--]${NC} $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $*"; }
 
 # cargar config
-if [ ! -f "$DOTENV" ]; then
-    fail "No existe $DOTENV"
+if [ ! -f "$ROUTER_ENV" ]; then
+    fail "No existe $ROUTER_ENV"
+    fail "Arranca el router con start-router.sh primero."
     exit 1
 fi
 
 set -a
 # shellcheck disable=SC1090
-source "$DOTENV"
+source "$ROUTER_ENV"
 set +a
 
 : "${ROUTER_HOST:=127.0.0.1}"
 : "${ROUTER_PORT:=4000}"
-: "${CODEX_ADAPTER_HOST:=$ROUTER_HOST}"
-: "${CODEX_ADAPTER_PORT:=4001}"
+: "${MOONBRIDGE_HOST:=$ROUTER_HOST}"
+: "${MOONBRIDGE_PORT:=4001}"
 BASE="http://${ROUTER_HOST}:${ROUTER_PORT}"
-CODEX_BASE="http://${CODEX_ADAPTER_HOST}:${CODEX_ADAPTER_PORT}"
+CODEX_BASE="http://${MOONBRIDGE_HOST}:${MOONBRIDGE_PORT}"
 
 echo "=== LLMRouter - Test ==="
 echo ""
@@ -111,16 +112,16 @@ except Exception:
     fi
 }
 
-test_model "zai-sonnet" "Z.AI Sonnet"
-test_model "deepseek-opus" "DeepSeek Opus"
-test_model "deepseek-haiku" "DeepSeek Haiku"
+test_model "opus" "Opus tier"
+test_model "sonnet" "Sonnet tier"
+test_model "haiku" "Haiku tier"
 
 echo ""
 echo "--- Test Codex adapter (OpenAI /v1/responses) ---"
 RESP=$(curl -s -w "\n%{http_code}" "$CODEX_BASE/v1/responses" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
-    -d '{"model":"deepseek-haiku","input":"Responde solo: OK","max_output_tokens":64,"stream":false,"tools":[{"type":"namespace","name":"unsupported_probe"}]}' \
+    -d '{"model":"haiku","input":"Responde solo: OK","max_output_tokens":64,"stream":false,"tools":[{"type":"namespace","name":"unsupported_probe"}]}' \
     --max-time 45 2>/dev/null || echo -e "\n000")
 
 HTTP_CODE=$(echo "$RESP" | tail -1)

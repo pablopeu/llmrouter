@@ -1,0 +1,68 @@
+# LLMRouter — configuracion (UNICO archivo, contiene claves).
+# Copia este archivo a models.yaml y completa tus claves:
+#   cp models.yaml.example models.yaml && chmod 600 models.yaml
+#
+# Para reasignar que modelo es opus / sonnet / haiku, edita SOLO "tiers" y reinicia
+# con restart-router.sh. Ambos caminos (Claude y Codex) se actualizan a la vez.
+
+providers:
+  zai:
+    api_base: https://api.z.ai/api/anthropic
+    api_key: your-zai-api-key
+  deepseek:
+    api_base: https://api.deepseek.com/anthropic
+    api_key: your-deepseek-api-key
+
+backends:
+  glm-52:
+    provider: zai
+    model: glm-5.2
+    display_name: "GLM 5.2 (Z.AI)"
+    description: "GLM 5.2 via Z.AI (endpoint Anthropic)"
+    context_window: 200000
+    max_output_tokens: 128000
+    default_reasoning_level: medium
+    supported_reasoning_levels: [low, medium, high]
+
+  deepseek-v4-pro:
+    provider: deepseek
+    model: deepseek-v4-pro
+    display_name: "DeepSeek V4 Pro"
+    description: "DeepSeek V4 Pro — maximo razonamiento"
+    context_window: 1000000
+    max_output_tokens: 384000
+    default_reasoning_level: high
+    supported_reasoning_levels: [high, xhigh]
+    supports_reasoning_summaries: true
+    default_reasoning_summary: auto
+    extension: deepseek_v4
+
+  deepseek-v4-flash:
+    provider: deepseek
+    model: deepseek-v4-flash
+    display_name: "DeepSeek V4 Flash"
+    description: "DeepSeek V4 Flash — rapido y barato"
+    context_window: 1000000
+    max_output_tokens: 384000
+    default_reasoning_level: high
+    supported_reasoning_levels: [high, xhigh]
+    supports_reasoning_summaries: true
+    default_reasoning_summary: auto
+    extension: deepseek_v4
+
+# ASIGNACION DE TIERS — edita esto para reasignar el mejor / intermedio / barato.
+# El valor es el nombre de un backend definido arriba.
+tiers:
+  opus: glm-52              # el mejor
+  sonnet: deepseek-v4-pro   # intermedio
+  haiku: deepseek-v4-flash  # barato / rapido
+
+router:
+  host: 127.0.0.1
+  port: 4000
+  master_key: sk-local-llmrouter-change-me
+
+codex:
+  port: 4001
+  default_tier: sonnet      # tier que usa Codex por defecto (ruta de Moon Bridge)
+  reasoning_effort: xhigh   # debe existir en supported_reasoning_levels del tier elegido

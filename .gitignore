@@ -1,6 +1,19 @@
+# Config con claves (fuente unica) y artefactos generados desde models.yaml
+models.yaml
+config.yaml
+moonbridge-config.yml
+router.env
+
+# Legado / igualmente secreto
 .env
+
+# Python
 .venv/
 __pycache__/
 *.py[cod]
+
+# Runtime
 logs/
+data/
 *.pid
+/moonbridge

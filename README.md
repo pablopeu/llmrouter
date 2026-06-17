@@ -1,108 +1,86 @@
 # LLMRouter
 
-Local LLM proxy using LiteLLM to share the same models between Claude Code and OpenAI Codex CLI.
+Proxy LLM local con LiteLLM que comparte los mismos modelos entre Claude Code y OpenAI Codex CLI.
 
-## What it does
+## Qué hace
 
-Starts two local services:
+Levanta dos servicios locales:
 
-- `127.0.0.1:4000` — LiteLLM proxy (Anthropic/OpenAI-compatible)
-- `127.0.0.1:4001` — Codex CLI adapter for the Responses API
+- `127.0.0.1:4000` — proxy LiteLLM (compatible Anthropic/OpenAI) para **Claude Code**
+- `127.0.0.1:4001` — Moon Bridge, adaptador del Responses API para **Codex CLI**
 
-The router maps these model aliases:
+El router expone tres **tiers**: `opus` (el mejor), `sonnet` (intermedio) y `haiku` (el más barato/rápido). Vos asignás cada tier a un modelo de cualquier proveedor en un único archivo (`models.yaml`). Claude y Codex usan esa misma asignación. Codex pasa por Moon Bridge porque manda herramientas nativas del Responses API que algunos backends rechazan; el adaptador las filtra y deriva a LiteLLM.
 
-| Alias | Backend | Real model |
-|-------|---------|------------|
-| `zai-sonnet` | Z.AI (Anthropic-compatible) | `glm-5.1` |
-| `deepseek-opus` | DeepSeek (OpenAI-compatible) | `deepseek-v4-pro` |
-| `deepseek-haiku` | DeepSeek (OpenAI-compatible) | `deepseek-v4-flash` |
-
-Claude Code talks directly to the LiteLLM proxy on `:4000`. Codex CLI goes through the local adapter on `:4001` because Codex sends native Responses API tools that some Anthropic-compatible backends reject — the adapter strips unsupported tools and forwards to LiteLLM.
-
-## Architecture
+## Arquitectura
 
 ```text
-Claude Code
-  ANTHROPIC_BASE_URL=http://127.0.0.1:4000
-        |
-        v
-LiteLLM Proxy (:4000) ----> Z.AI / DeepSeek
-        ^
-        |
-Codex CLI
-  OPENAI_BASE_URL=http://127.0.0.1:4001/v1
-        |
-        v
-Codex adapter (:4001)
+Claude Code                          Codex CLI
+  ANTHROPIC_BASE_URL=:4000            OPENAI_BASE_URL=:4001/v1
+        |                                  |
+        v                                  v
+LiteLLM Proxy (:4000)               Moon Bridge (:4001)
+        \                             /
+         \                           /
+          v                         v
+         Z.AI / DeepSeek / ... (backends definidos en models.yaml)
 ```
 
-## Getting started
+## Empezando
 
-### 1. Set up API keys
+### 1. Configurar `models.yaml`
 
 ```bash
 cd ~/llmrouter
-cp .env.example .env
-nano .env
-chmod 600 .env
+cp models.yaml.example models.yaml
+chmod 600 models.yaml
+nano models.yaml
 ```
 
-Fill in:
+Completá:
 
-- `ZAI_API_KEY`
-- `DEEPSEEK_API_KEY`
-- `LITELLM_MASTER_KEY`
+- `providers.*.api_key` — tus claves de cada proveedor (Z.AI, DeepSeek, etc.).
+- `router.master_key` — clave local del proxy (cualquier valor, ej. `sk-myrouter`).
 
-Optional overrides:
+Y asigná los tiers en la sección `tiers` (ver más abajo).
 
-- `ZAI_MODEL_FOR_SONNET` — GLM model via Z.AI
-- `DEEPSEEK_MODEL_FOR_OPUS` — most powerful DeepSeek model
-- `DEEPSEEK_MODEL_FOR_HAIKU` — fastest/cheapest DeepSeek model
-- `CODEX_DEFAULT_MODEL` — model alias Codex uses by default
-- `CODEX_REASONING_EFFORT` — reasoning effort for Codex (default: `xhigh`)
-- `CODEX_DISABLE_THINKING` — set `1` to disable DeepSeek thinking via `extra_body.thinking=disabled`
+> `models.yaml` contiene claves y por eso está en `.gitignore`. Es la **única** fuente de configuración.
 
-### 2. Install
+### 2. Instalar
 
 ```bash
 ~/llmrouter/install.sh
 ```
 
-This sets up the venv, installs LiteLLM, creates command symlinks in `~/.local/bin`, and installs a systemd user service if available.
+Crea el venv, instala LiteLLM, compila Moon Bridge, crea los symlinks en `~/.local/bin` e instala el servicio systemd de usuario si está disponible.
 
-### 3. Start
+### 3. Arrancar
 
 ```bash
 ~/llmrouter/start-router.sh
 ```
 
-Or with systemd:
+Al arrancar, el router lee `models.yaml` y **genera** `config.yaml` (LiteLLM), `moonbridge-config.yml` y `router.env` desde ese archivo. Esos tres son derivados y se ignoran en git.
+
+O con systemd:
 
 ```bash
 systemctl --user enable --now llmrouter
 ```
 
-### 4. Test
+### 4. Probar
 
 ```bash
 ~/llmrouter/test-router.sh
 ```
 
-### 5. Use
-
-Launch Claude Code through the router:
+### 5. Usar
 
 ```bash
-clauder
+clauder    # Claude Code contra el router
+codexr     # Codex CLI contra el router
 ```
 
-Launch Codex CLI through the router:
-
-```bash
-codexr
-```
-
-General helper:
+Helper general:
 
 ```bash
 llmrouter status
@@ -111,180 +89,111 @@ llmrouter claude
 llmrouter codex
 ```
 
-## Commands
+## Comandos
 
-| Command | Description |
+| Comando | Descripción |
 |---------|-------------|
-| `llmrouter start` | Start LiteLLM and the Codex adapter |
-| `llmrouter stop` | Stop both processes |
-| `llmrouter restart` | Restart both processes |
-| `llmrouter status` | Show status and health checks |
-| `llmrouter test` | Test models and Codex adapter |
-| `clauder` | Launch Claude Code pointed at the router |
-| `codexr` | Launch Codex CLI pointed at the router |
+| `llmrouter start` | Arrancar LiteLLM y Moon Bridge |
+| `llmrouter stop` | Detener ambos |
+| `llmrouter restart` | Reiniciar ambos |
+| `llmrouter status` | Estado y health checks |
+| `llmrouter test` | Probar modelos y el adaptador Codex |
+| `clauder` | Lanzar Claude Code contra el router |
+| `codexr` | Lanzar Codex CLI contra el router |
 
-## Changing models
+## Configurar modelos (reasignar tiers)
 
-Edit `~/llmrouter/.env`:
-
-```bash
-DEEPSEEK_MODEL_FOR_OPUS=deepseek-reasoner
-ZAI_MODEL_FOR_SONNET=glm-4-plus
-CODEX_DEFAULT_MODEL=deepseek-opus
-```
-
-Then restart:
-
-```bash
-~/llmrouter/restart-router.sh
-```
-
-## Adding other providers
-
-LLMRouter uses LiteLLM under the hood, which supports 100+ providers. To add a new one (e.g. Claude, Kimi, Qwen, Grok), you need to edit two files:
-
-### 1. Add the model to `config.yaml`
-
-Each entry maps an alias to a real model via environment variables:
+Todo se hace en **`models.yaml`**, sección `tiers`. El valor de cada tier es el nombre de un backend definido en `backends`:
 
 ```yaml
-model_list:
-  # ... existing entries ...
-
-  # Example: Claude via Anthropic (Anthropic-compatible)
-  - model_name: claude-sonnet
-    litellm_params:
-      model: os.environ/CLAUDE_MODEL
-      api_key: os.environ/CLAUDE_API_KEY
-
-  # Example: Qwen via Alibaba Cloud (OpenAI-compatible)
-  - model_name: qwen-coder
-    litellm_params:
-      model: os.environ/QWEN_MODEL
-      api_key: os.environ/QWEN_API_KEY
-      api_base: os.environ/QWEN_API_BASE
-
-  # Example: Grok via xAI (OpenAI-compatible)
-  - model_name: grok
-    litellm_params:
-      model: os.environ/GROK_MODEL
-      api_key: os.environ/GROK_API_KEY
-      api_base: os.environ/GROK_API_BASE
-
-  # Example: Kimi via Moonshot (OpenAI-compatible)
-  - model_name: kimi
-    litellm_params:
-      model: os.environ/KIMI_MODEL
-      api_key: os.environ/KIMI_API_KEY
-      api_base: os.environ/KIMI_API_BASE
+tiers:
+  opus:   deepseek-v4-pro   # el mejor
+  sonnet: glm-52            # intermedio
+  haiku:  deepseek-v4-flash # barato / rápido
 ```
 
-### 2. Add the variables to `.env`
-
-```bash
-# --- Claude (Anthropic) ---
-# No api_base needed — LiteLLM uses the official Anthropic endpoint.
-CLAUDE_API_KEY=your-anthropic-api-key
-CLAUDE_MODEL=anthropic/claude-sonnet-4-6
-
-# --- Qwen (Alibaba Cloud) ---
-QWEN_API_KEY=your-qwen-api-key
-QWEN_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
-QWEN_MODEL=openai/qwen-coder-plus-latest
-
-# --- Grok (xAI) ---
-GROK_API_KEY=your-grok-api-key
-GROK_API_BASE=https://api.x.ai/v1
-GROK_MODEL=openai/grok-4
-
-# --- Kimi (Moonshot) ---
-KIMI_API_KEY=your-kimi-api-key
-KIMI_API_BASE=https://api.moonshot.cn/v1
-KIMI_MODEL=openai/moonshot-v1-auto
-```
-
-### 3. Restart and use
+Para cambiar qué modelo es `opus`/`sonnet`/`haiku`, editá esa sección y reiniciá:
 
 ```bash
 ~/llmrouter/restart-router.sh
 ```
 
-Then use the alias as your default model.
+Claude y Codex reflejan el cambio a la vez (ambos leen los mismos tiers).
 
-For **Codex CLI**, set in `.env`:
+- Claude Code: `claude-mix` expone los tiers como aliases `opus`/`sonnet`/`haiku` (más los nombres canónicos `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`).
+- Codex: `codex-mix` usa por defecto `codex.default_tier` (ej. `sonnet`). Cambialo en `models.yaml` si querés otro.
 
-```bash
-CODEX_DEFAULT_MODEL=qwen-coder
+## Agregar un proveedor o modelo
+
+Todo en `models.yaml`:
+
+1. Agregá el proveedor en `providers` (con `api_base` y `api_key`):
+
+```yaml
+providers:
+  qwen:
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: your-qwen-api-key
 ```
 
-For **Claude Code**, set in `.env`:
+2. Agregá el backend en `backends` (proveedor + nombre real del modelo + metadatos que usa Moon Bridge):
 
-```bash
-CLAUDE_SONNET_MODEL=qwen-coder
-CLAUDE_OPUS_MODEL=qwen-coder
-CLAUDE_HAIKU_MODEL=deepseek-haiku
-CLAUDE_SUBAGENT_MODEL=deepseek-haiku
+```yaml
+backends:
+  qwen-coder:
+    provider: qwen
+    model: qwen-coder-plus-latest
+    litellm_provider: openai        # openai para APIs OpenAI-compatible; anthropic para formato Anthropic
+    display_name: "Qwen Coder"
+    context_window: 131072
+    max_output_tokens: 8192
+    default_reasoning_level: medium
+    supported_reasoning_levels: [low, medium, high]
 ```
 
-These map to `model_name` entries in `config.yaml` and override the defaults.
+3. Asignalo a un tier en `tiers` (ej. `sonnet: qwen-coder`) y reiniciá.
 
-### Model name format
+### Formato del nombre de modelo
 
-LiteLLM uses a `provider/model` prefix to route to the right API. Common patterns:
+LiteLLM usa un prefijo `litellm_provider/model` para saber cómo hablar con el backend:
 
-| Provider type | `api_base` | `model` value |
-|--------------|-----------|---------------|
-| OpenAI-compatible | provider's `/v1` endpoint | `openai/model-name` |
-| Anthropic-compatible | provider's API endpoint | `anthropic/model-name` |
-| Anthropic (official) | not needed | `anthropic/model-name` |
+| Tipo de API | `api_base` | `litellm_provider` |
+|-------------|-----------|-------------------|
+| OpenAI-compatible | endpoint `/v1` del proveedor | `openai` |
+| Anthropic-compatible | endpoint Anthropic del proveedor | `anthropic` |
 
-Key difference: Anthropic-native providers don't need `api_base` — LiteLLM sends requests directly to `api.anthropic.com`. OpenAI-compatible providers need `api_base` pointing to their `/v1` endpoint.
+`litellm_provider` por defecto es `anthropic` (así viene Z.AI y DeepSeek). Usá `openai` para proveedores OpenAI-compatible. Ver los [docs de providers de LiteLLM](https://docs.litellm.ai/docs/providers).
 
-Check [LiteLLM's provider docs](https://docs.litellm.ai/docs/providers) for the correct prefix and endpoint for each provider.
+### Validación al arrancar
+
+`start-router.sh` valida `models.yaml` antes de levantar nada: que los tres tiers existan y apunten a backends válidos, que cada backend cite un proveedor con clave, y que el `reasoning_effort` de Codex esté soportado por su tier. Si algo falla, te dice exactamente qué corregir.
 
 ## Troubleshooting
 
-### Ports in use
+### Puertos en uso
 
-Default ports:
-
-- `ROUTER_PORT=4000`
-- `CODEX_ADAPTER_PORT=4001`
-
-Change them in `.env` or stop with:
+Por defecto `ROUTER_PORT=4000` y `MOONBRIDGE_PORT=4001` (en `router` y `codex` dentro de `models.yaml`). Cambialos ahí o detené con:
 
 ```bash
 ~/llmrouter/stop-router.sh
 ```
 
-### Codex fails with unsupported tools
+### Codex falla con herramientas no soportadas
 
-Use `llmrouter-codex` (or `codexr`), don't point Codex directly at `:4000`. Port `:4001` exists to filter Responses API tools that LiteLLM can't convert for these backends.
+Usá `codexr` (o `llmrouter codex`), no apuntes Codex directo a `:4000`. El `:4001` existe para filtrar herramientas del Responses API que LiteLLM no convierte para estos backends.
 
-### Claude Code ignores the router
+### Claude Code ignora el router
 
-Verify with:
+Verificá con `clauder`; debería mostrar `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`. Si `~/.claude/settings.json` tiene `ANTHROPIC_BASE_URL` hardcodeado, ese ajuste puede ganar.
 
-```bash
-llmrouter-claude
-```
-
-It should show:
-
-```text
-ANTHROPIC_BASE_URL=http://127.0.0.1:4000
-```
-
-If `~/.claude/settings.json` has `ANTHROPIC_BASE_URL` hardcoded, that setting may take precedence.
-
-### View logs
+### Ver logs
 
 ```bash
 tail -f ~/llmrouter/logs/router.log
-tail -f ~/llmrouter/logs/codex-adapter.log
+tail -f ~/llmrouter/logs/moonbridge.log
 ```
 
-### Uninstall
+### Desinstalar
 
 ```bash
 ~/llmrouter/stop-router.sh

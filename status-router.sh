@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTENV="$SCRIPT_DIR/.env"
+ROUTER_ENV="$SCRIPT_DIR/router.env"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,16 +13,16 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 
 # cargar puerto
-if [ -f "$DOTENV" ]; then
+if [ -f "$ROUTER_ENV" ]; then
     set -a
     # shellcheck disable=SC1090
-    source "$DOTENV"
+    source "$ROUTER_ENV"
     set +a
 fi
 : "${ROUTER_HOST:=127.0.0.1}"
 : "${ROUTER_PORT:=4000}"
-: "${CODEX_ADAPTER_HOST:=$ROUTER_HOST}"
-: "${CODEX_ADAPTER_PORT:=4001}"
+: "${MOONBRIDGE_HOST:=$ROUTER_HOST}"
+: "${MOONBRIDGE_PORT:=4001}"
 
 echo "=== LLMRouter Status ==="
 echo ""
@@ -40,9 +40,9 @@ fi
 
 # --- puertos ---
 if ss -tlnp 2>/dev/null | grep -q ":${ROUTER_PORT} "; then
-    info "Puerto ${ROUTER_PORT}: escuchando"
+    info "Puerto ${ROUTER_PORT} (LiteLLM): escuchando"
 else
-    echo -e "${RED}[INFO]${NC} Puerto ${ROUTER_PORT}: NO escuchando"
+    echo -e "${RED}[INFO]${NC} Puerto ${ROUTER_PORT} (LiteLLM): NO escuchando"
 fi
 
 # --- PID files ---
@@ -50,33 +50,33 @@ PID_FILE="$SCRIPT_DIR/router.pid"
 if [ -f "$PID_FILE" ]; then
     PID="$(cat "$PID_FILE")"
     if kill -0 "$PID" 2>/dev/null; then
-        info "PID: $PID (corriendo)"
+        info "LiteLLM PID: $PID (corriendo)"
     else
-        warn "PID: $PID (muerto, stale PID file)"
+        warn "LiteLLM PID: $PID (muerto, stale PID file)"
     fi
 else
-    warn "PID file: no existe"
+    warn "LiteLLM PID file: no existe"
 fi
 
-ADAPTER_PID_FILE="$SCRIPT_DIR/codex-adapter.pid"
-if ss -tlnp 2>/dev/null | grep -q ":${CODEX_ADAPTER_PORT} "; then
-    info "Puerto ${CODEX_ADAPTER_PORT} (Codex): escuchando"
+MOON_PID_FILE="$SCRIPT_DIR/moonbridge.pid"
+if ss -tlnp 2>/dev/null | grep -q ":${MOONBRIDGE_PORT} "; then
+    info "Puerto ${MOONBRIDGE_PORT} (Moon Bridge): escuchando"
 else
-    echo -e "${RED}[INFO]${NC} Puerto ${CODEX_ADAPTER_PORT} (Codex): NO escuchando"
+    echo -e "${RED}[INFO]${NC} Puerto ${MOONBRIDGE_PORT} (Moon Bridge): NO escuchando"
 fi
 
-if [ -f "$ADAPTER_PID_FILE" ]; then
-    PID="$(cat "$ADAPTER_PID_FILE")"
+if [ -f "$MOON_PID_FILE" ]; then
+    PID="$(cat "$MOON_PID_FILE")"
     if kill -0 "$PID" 2>/dev/null; then
-        info "Codex PID: $PID (corriendo)"
+        info "Moon Bridge PID: $PID (corriendo)"
     else
-        warn "Codex PID: $PID (muerto, stale PID file)"
+        warn "Moon Bridge PID: $PID (muerto, stale PID file)"
     fi
 else
-    warn "Codex PID file: no existe"
+    warn "Moon Bridge PID file: no existe"
 fi
 
-# --- health endpoint ---
+# --- health endpoints ---
 AUTH_ARGS=()
 if [ -n "${LITELLM_MASTER_KEY:-}" ]; then
     AUTH_ARGS=(-H "Authorization: Bearer ${LITELLM_MASTER_KEY}")
@@ -91,14 +91,14 @@ else
     warn "LiteLLM health: HTTP $RESP"
 fi
 
-RESP=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "http://${CODEX_ADAPTER_HOST}:${CODEX_ADAPTER_PORT}/health" 2>/dev/null || true)
+RESP=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "http://${MOONBRIDGE_HOST}:${MOONBRIDGE_PORT}/health" 2>/dev/null || true)
 : "${RESP:=000}"
 if [ "$RESP" = "200" ]; then
-    info "Codex adapter health: OK (HTTP 200)"
+    info "Moon Bridge health: OK (HTTP 200)"
 elif [ "$RESP" = "000" ]; then
-    echo -e "${RED}[INFO]${NC} Codex adapter health: sin conexion"
+    echo -e "${RED}[INFO]${NC} Moon Bridge health: sin conexion"
 else
-    warn "Codex adapter health: HTTP $RESP"
+    warn "Moon Bridge health: HTTP $RESP"
 fi
 
 echo ""

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTENV="$SCRIPT_DIR/.env"
+ROUTER_ENV="$SCRIPT_DIR/router.env"
 PID_FILE="$SCRIPT_DIR/router.pid"
-ADAPTER_PID_FILE="$SCRIPT_DIR/codex-adapter.pid"
+MOON_PID_FILE="$SCRIPT_DIR/moonbridge.pid"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -15,14 +15,14 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
-if [ -f "$DOTENV" ]; then
+if [ -f "$ROUTER_ENV" ]; then
     set -a
     # shellcheck disable=SC1090
-    source "$DOTENV"
+    source "$ROUTER_ENV"
     set +a
 fi
 : "${ROUTER_PORT:=4000}"
-: "${CODEX_ADAPTER_PORT:=4001}"
+: "${MOONBRIDGE_PORT:=4001}"
 
 stop_pid_file() {
     local pid_file="$1"
@@ -81,10 +81,18 @@ fi
 
 # --- matar procesos manuales ---
 STOPPED=0
-stop_pid_file "$ADAPTER_PID_FILE" "adaptador Codex" && STOPPED=1 || true
+stop_pid_file "$MOON_PID_FILE" "Moon Bridge" && STOPPED=1 || true
 stop_pid_file "$PID_FILE" "router" && STOPPED=1 || true
-stop_port "$CODEX_ADAPTER_PORT" "adaptador Codex" && STOPPED=1 || true
+stop_port "$MOONBRIDGE_PORT" "Moon Bridge" && STOPPED=1 || true
 stop_port "$ROUTER_PORT" "router" && STOPPED=1 || true
+
+# --- limpiar PIDs huerfanos del antiguo Codex adapter ---
+OLD_ADAPTER_PID="$SCRIPT_DIR/codex-adapter.pid"
+if [ -f "$OLD_ADAPTER_PID" ]; then
+    OLD_PID="$(cat "$OLD_ADAPTER_PID")"
+    kill -0 "$OLD_PID" 2>/dev/null && kill "$OLD_PID" 2>/dev/null || true
+    rm -f "$OLD_ADAPTER_PID"
+fi
 
 if [ "$STOPPED" = "0" ]; then
     info "Router no esta corriendo."

@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
-DOTENV="$SCRIPT_DIR/.env"
-DOTENV_EXAMPLE="$SCRIPT_DIR/.env.example"
+MODELS_YAML="$SCRIPT_DIR/models.yaml"
+MODELS_EXAMPLE="$SCRIPT_DIR/models.yaml.example"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -15,17 +15,17 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
-# --- .env ---
-if [ ! -f "$DOTENV" ]; then
-    cp "$DOTENV_EXAMPLE" "$DOTENV"
-    chmod 600 "$DOTENV"
-    info "Creado .env desde .env.example con permisos 600."
-    warn "DEBES editar $DOTENV con tus API keys antes de arrancar el router."
-    MUST_EDIT_ENV=1
+# --- models.yaml ---
+if [ ! -f "$MODELS_YAML" ]; then
+    cp "$MODELS_EXAMPLE" "$MODELS_YAML"
+    chmod 600 "$MODELS_YAML"
+    info "Creado models.yaml desde models.yaml.example con permisos 600."
+    warn "DEBES editar $MODELS_YAML con tus API keys antes de arrancar el router."
+    MUST_EDIT=1
 else
-    chmod 600 "$DOTENV"
-    info ".env ya existe, permisos 600 asegurados."
-    MUST_EDIT_ENV=0
+    chmod 600 "$MODELS_YAML"
+    info "models.yaml ya existe, permisos 600 asegurados."
+    MUST_EDIT=0
 fi
 
 # --- venv ---
@@ -41,6 +41,39 @@ info "Instalando litellm[proxy] en el venv ..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet 'litellm[proxy]!=1.82.7,!=1.82.8'
 info "litellm instalado: $("$VENV_DIR/bin/python" -c 'import litellm; print(litellm.__version__)' 2>/dev/null || echo 'version desconocida')"
+
+# --- compilar Moon Bridge ---
+MOON_BIN="$SCRIPT_DIR/moonbridge"
+GO_BIN=""
+for candidate in "$HOME/.local/go/bin/go" /usr/local/go/bin/go /usr/bin/go; do
+    if [ -x "$candidate" ]; then
+        GO_BIN="$candidate"
+        break
+    fi
+done
+
+if [ ! -x "$MOON_BIN" ]; then
+    if [ -z "$GO_BIN" ]; then
+        warn "Go no encontrado. Instalando Go 1.24 en ~/.local/go ..."
+        GO_TARBALL="/tmp/go.tar.gz"
+        curl -sL -o "$GO_TARBALL" https://go.dev/dl/go1.24.3.linux-amd64.tar.gz
+        mkdir -p "$HOME/.local"
+        tar -C "$HOME/.local" -xzf "$GO_TARBALL"
+        rm -f "$GO_TARBALL"
+        GO_BIN="$HOME/.local/go/bin/go"
+        info "Go instalado: $($GO_BIN version)"
+    fi
+
+    info "Compilando Moon Bridge ..."
+    MOON_TMPDIR="$(mktemp -d)"
+    export PATH="$HOME/.local/go/bin:$PATH"
+    git clone --depth 1 https://github.com/ZhiYi-R/moon-bridge.git "$MOON_TMPDIR"
+    (cd "$MOON_TMPDIR" && go build -o moonbridge ./cmd/moonbridge)
+    cp "$MOON_TMPDIR/moonbridge" "$MOON_BIN"
+    rm -rf "$MOON_TMPDIR"
+else
+    info "Moon Bridge ya existe: $MOON_BIN"
+fi
 
 # --- comandos en PATH ---
 TARGET_BIN=""
@@ -94,10 +127,10 @@ echo "========================================="
 echo ""
 echo "Archivos en: $SCRIPT_DIR"
 echo ""
-if [ "$MUST_EDIT_ENV" = "1" ]; then
+if [ "$MUST_EDIT" = "1" ]; then
     echo -e "${RED}PROXIMO PASO OBLIGATORIO:${NC}"
-    echo "  1) Edita tus API keys:"
-    echo "     nano $DOTENV"
+    echo "  1) Edita tus API keys y asigna los tiers:"
+    echo "     nano $MODELS_YAML"
     echo ""
 fi
 echo "  2) Arranca el router:"
@@ -122,6 +155,6 @@ echo "  llmrouter          - helper start/stop/status/test/claude/codex"
 echo "  llmrouter-claude   - lanzar Claude Code"
 echo "  llmrouter-codex    - lanzar Codex CLI"
 echo ""
-echo "Para cambiar modelos, edita $DOTENV"
+echo "Para cambiar modelos, edita $MODELS_YAML"
 echo "y reinicia con restart-router.sh"
 echo "========================================="

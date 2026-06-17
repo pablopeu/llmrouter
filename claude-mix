@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTENV="$SCRIPT_DIR/.env"
+MODELS_YAML="$SCRIPT_DIR/models.yaml"
+ROUTER_ENV="$SCRIPT_DIR/router.env"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -14,44 +15,52 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
-if [ ! -f "$DOTENV" ]; then
-    error "No existe $DOTENV"
+if [ ! -f "$MODELS_YAML" ]; then
+    error "No existe $MODELS_YAML"
     error "Ejecuta $SCRIPT_DIR/install.sh primero."
     exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-source "$DOTENV"
-set +a
+# Cargar router.env si existe (para conocer puerto/clave), y arrancar el router si hace falta.
+if [ -f "$ROUTER_ENV" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ROUTER_ENV"
+    set +a
+fi
 
 : "${ROUTER_HOST:=127.0.0.1}"
 : "${ROUTER_PORT:=4000}"
 : "${LITELLM_MASTER_KEY:=}"
 
-if [ -z "$LITELLM_MASTER_KEY" ] || [[ "$LITELLM_MASTER_KEY" == *change-me* ]]; then
-    error "LITELLM_MASTER_KEY no configurada en $DOTENV"
-    exit 1
-fi
-
-if ! ss -tlnp 2>/dev/null | grep -q ":${ROUTER_PORT} "; then
+if [ -z "$LITELLM_MASTER_KEY" ] || \
+   ! ss -tlnp 2>/dev/null | grep -q ":${ROUTER_PORT} "; then
     warn "Router no esta corriendo. Intentando arrancar ..."
     "$SCRIPT_DIR/start-router.sh"
+    set -a
+    # shellcheck disable=SC1090
+    source "$ROUTER_ENV"
+    set +a
+    : "${ROUTER_HOST:=127.0.0.1}"
+    : "${ROUTER_PORT:=4000}"
+    : "${LITELLM_MASTER_KEY:=}"
+fi
+
+if [ -z "$LITELLM_MASTER_KEY" ]; then
+    error "No se pudo determinar LITELLM_MASTER_KEY. Revisa $MODELS_YAML y arranca el router."
+    exit 1
 fi
 
 export ANTHROPIC_BASE_URL="http://${ROUTER_HOST}:${ROUTER_PORT}"
 export ANTHROPIC_AUTH_TOKEN="${LITELLM_MASTER_KEY}"
-: "${CLAUDE_SONNET_MODEL:=zai-sonnet}"
-: "${CLAUDE_OPUS_MODEL:=deepseek-opus}"
-: "${CLAUDE_HAIKU_MODEL:=deepseek-haiku}"
-: "${CLAUDE_SUBAGENT_MODEL:=deepseek-haiku}"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLAUDE_SONNET_MODEL"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLAUDE_OPUS_MODEL"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLAUDE_HAIKU_MODEL"
-export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDE_SUBAGENT_MODEL"
+# Los tiers (opus/sonnet/haiku) son aliases en config.yaml generados desde models.yaml.
+export ANTHROPIC_DEFAULT_OPUS_MODEL="opus"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="sonnet"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="haiku"
+export CLAUDE_CODE_SUBAGENT_MODEL="haiku"
 
 info "ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL"
-info "Modelo default: opus (${ANTHROPIC_DEFAULT_OPUS_MODEL})"
+info "Tiers: opus/sonnet/haiku (ver $MODELS_YAML para reasignar)"
 info "Subagentes: ${CLAUDE_CODE_SUBAGENT_MODEL}"
 echo ""
 
