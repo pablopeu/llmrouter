@@ -9,6 +9,11 @@ providers:
   zai:
     api_base: https://api.z.ai/api/anthropic
     api_key: your-zai-api-key
+    # Opcional: limita requests en paralelo / por minuto hacia el provider para
+    # no gatillar su rate-limit transitorio (z.ai 1302). Tambien se puede poner
+    # por backend (sobreescribe al provider). Omitir = sin limite.
+    max_parallel_requests: 2
+    # rpm: 60
   deepseek:
     api_base: https://api.deepseek.com/anthropic
     api_key: your-deepseek-api-key
@@ -61,6 +66,11 @@ router:
   host: 127.0.0.1
   port: 4000
   master_key: sk-local-llmrouter-change-me
+  # Opcional: reintentos ante rate-limit/timeout transitorios antes de propagar
+  # el error a Claude Code. retry_after = segundos base de backoff.
+  num_retries: 3
+  retry_after: 5
+  cooldown_time: 15
 
 codex:
   port: 4001

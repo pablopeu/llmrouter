@@ -123,13 +123,19 @@ def resolve(data):
     for t in TIERS:
         bname = tiers[t]
         b = backends[bname]
+        pv = providers[b["provider"]]
+        # Limite de concurrencia/tasa: el backend puede sobreescribir al provider.
+        mpr = b.get("max_parallel_requests", pv.get("max_parallel_requests"))
+        rpm = b.get("rpm", pv.get("rpm"))
         resolved[t] = {
             "backend": bname,
             "model": b["model"],
             "litellm_provider": b.get("litellm_provider", "anthropic"),
             "provider": b["provider"],
-            "api_key": providers[b["provider"]]["api_key"],
-            "api_base": providers[b["provider"]]["api_base"],
+            "api_key": pv["api_key"],
+            "api_base": pv["api_base"],
+            "max_parallel_requests": mpr,
+            "rpm": rpm,
         }
     return resolved
 
@@ -144,13 +150,36 @@ def build_litellm_config(data, resolved):
             "api_key": r["api_key"],
             "api_base": r["api_base"],
         }
+        # (2) Limitar concurrencia/tasa hacia el provider para no gatillar los
+        # rate-limit transitorios (z.ai 1302). Se aplica por deployment.
+        if r.get("max_parallel_requests") is not None:
+            base["max_parallel_requests"] = int(r["max_parallel_requests"])
+        if r.get("rpm") is not None:
+            base["rpm"] = int(r["rpm"])
         for alias in (CANONICAL[t], t):
             model_list.append({"model_name": alias, "litellm_params": dict(base)})
+
+    # (1) Reintentos con backoff: absorbe los rate-limit transitorios antes de
+    # propagarlos a Claude Code. retry_policy reintenta especificamente los 429.
+    num_retries = int(router.get("num_retries", 3))
+    retry_after = int(router.get("retry_after", 5))
+    cooldown_time = int(router.get("cooldown_time", 15))
+    router_settings = {
+        "num_retries": num_retries,
+        "retry_after": retry_after,
+        "cooldown_time": cooldown_time,
+        "retry_policy": {
+            "RateLimitErrorRetries": num_retries,
+            "TimeoutErrorRetries": num_retries,
+            "InternalServerErrorRetries": 1,
+        },
+    }
 
     return {
         "model_list": model_list,
         "general_settings": {"master_key": router.get("master_key")},
         "litellm_settings": {"drop_params": True, "set_verbose": False},
+        "router_settings": router_settings,
         "server_settings": {
             "host": router.get("host", "127.0.0.1"),
             "port": int(router.get("port", 4000)),
