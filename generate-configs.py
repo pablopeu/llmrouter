@@ -178,7 +178,19 @@ def build_litellm_config(data, resolved):
     return {
         "model_list": model_list,
         "general_settings": {"master_key": router.get("master_key")},
-        "litellm_settings": {"drop_params": True, "set_verbose": False},
+        # callbacks: fix del error de DeepSeek V4 thinking en multi-turno
+        # ("content[].thinking must be passed back to the API") y parches sobre
+        # LiteLLM (p.ej. el bug de cost-tracking con server_tool_use como dict).
+        # Los modulos viven junto a config.yaml y se cargan via get_instance_fn
+        # (resuelve modulo.instancia en el dir del config).
+        "litellm_settings": {
+            "drop_params": True,
+            "set_verbose": False,
+            "callbacks": [
+                "deepseek_thinking.deepseek_thinking_handler",
+                "litellm_patches.litellm_patches_handler",
+            ],
+        },
         "router_settings": router_settings,
         "server_settings": {
             "host": router.get("host", "127.0.0.1"),

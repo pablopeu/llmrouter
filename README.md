@@ -178,6 +178,26 @@ Por defecto `ROUTER_PORT=4000` y `MOONBRIDGE_PORT=4001` (en `router` y `codex` d
 ~/llmrouter/stop-router.sh
 ```
 
+### Error de DeepSeek: "`content[].thinking` ... must be passed back to the API"
+
+Los modelos de razonamiento de DeepSeek V4 (los backends `deepseek-v4-pro` / `deepseek-v4-flash`, típicamente el tier `haiku`) firman **sus propios** bloques `thinking`. En una conversación multi-turno DeepSeek exige que esos bloques se **reenvíen intactos** en el historial. Claude Code los stripia/redienta (asume que solo los firmados por Anthropic son verificables), así que el turno siguiente llega sin thinking y DeepSeek responde 400:
+
+```
+400 The `content[].thinking` in the thinking mode must be passed back to the API.
+```
+
+(o la variante `Expected 'thinking' or 'redacted_thinking', but found 'tool_use'`).
+
+El router lo resuelve automáticamente con un callback de LiteLLM (`deepseek_thinking.py`, cargado vía `litellm_settings.callbacks`): cachea los bloques `thinking` de cada respuesta (indexados por un fingerprint estable del prefijo de la conversación) y los **re-inyecta** en los mensajes asistente del historial que los perdieron antes de reenviar a DeepSeek. Es el mismo enfoque que usan Hermes Agent, opencode y claude-code-router.
+
+- No requiere configuración: se activa solo al arrancar.
+- El cache es en memoria (se pierde al reiniciar; las nuevas continuaciones dentro de la sesión se reconstruyen solas).
+- Actividad visible en `logs/deepseek_thinking.log` (líneas `cacheados ...` / `reinyectados ...`).
+
+### Ruido en `router.log`: `'dict' object has no attribute 'web_search_requests'`
+
+Bug no-fatal de LiteLLM 1.83.x en el cost-tracker: algunos backends (DeepSeek, Z.AI) devuelven `usage.server_tool_use` como dict sin parsear, y el cálculo de costo hace acceso por atributo `.web_search_requests` → `AttributeError` logueada en cada respuesta (rompe el tracking de costo y ensucia el log, pero el request devuelve 200). El router lo cura con un monkeypatch quirúrgico en `litellm_patches.py` (cargado como callback), que coerciona el dict al modelo esperado. Carga confirmable en `logs/litellm_patches.log`.
+
 ### Codex falla con herramientas no soportadas
 
 Usá `codexr` (o `llmrouter codex`), no apuntes Codex directo a `:4000`. El `:4001` existe para filtrar herramientas del Responses API que LiteLLM no convierte para estos backends.
@@ -191,6 +211,7 @@ Verificá con `clauder`; debería mostrar `ANTHROPIC_BASE_URL=http://127.0.0.1:4
 ```bash
 tail -f ~/llmrouter/logs/router.log
 tail -f ~/llmrouter/logs/moonbridge.log
+tail -f ~/llmrouter/logs/deepseek_thinking.log   # reinyección de thinking (fix DeepSeek)
 ```
 
 ### Desinstalar
