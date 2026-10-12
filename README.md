@@ -107,10 +107,15 @@ Todo se hace en **`models.yaml`**, sección `tiers`. El valor de cada tier es el
 
 ```yaml
 tiers:
-  opus:   deepseek-v4-pro   # el mejor
-  sonnet: glm-52            # intermedio
-  haiku:  deepseek-v4-flash # barato / rápido
+  opus:   glm-5.3            # el mejor
+  sonnet: glm-5.3-flash      # intermedio
+  haiku:  deepseek-v4-flash  # barato / rápido
 ```
+
+> **Convención**: la clave de cada backend en `backends` es el **id exacto del
+> modelo en el proveedor**. El campo `model` es opcional (vale la clave) y, si
+> se define, debe coincidir — el arranque rechaza cualquier divergencia. Así el
+> nombre nunca queda desincronizado del modelo que realmente sirve.
 
 Para cambiar qué modelo es `opus`/`sonnet`/`haiku`, editá esa sección y reiniciá:
 
@@ -127,31 +132,33 @@ Claude y Codex reflejan el cambio a la vez (ambos leen los mismos tiers).
 
 Todo en `models.yaml`:
 
-1. Agregá el proveedor en `providers` (con `api_base` y `api_key`):
+1. Agregá el proveedor en `providers` (con `api_base` y `api_key`). Si el modelo
+   necesita endpoint distinto al del formato Anthropic, o tiene metadatos que se
+   repiten entre sus modelos, usá `defaults`:
 
 ```yaml
 providers:
   qwen:
     api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key: your-qwen-api-key
+    defaults:
+      context_window: 131072
+      max_output_tokens: 8192
+      supported_reasoning_levels: [low, medium, high]
 ```
 
-2. Agregá el backend en `backends` (proveedor + nombre real del modelo + metadatos que usa Moon Bridge):
+2. Agregá el backend en `backends`: la clave es el **id exacto del modelo** en
+   el proveedor (el campo `model` es opcional y debe coincidir si lo definís).
 
 ```yaml
 backends:
-  qwen-coder:
+  qwen-coder-plus-latest:
     provider: qwen
-    model: qwen-coder-plus-latest
-    litellm_provider: openai        # openai para APIs OpenAI-compatible; anthropic para formato Anthropic
+    litellm_provider: openai   # openai para APIs OpenAI-compatible; anthropic para formato Anthropic
     display_name: "Qwen Coder"
-    context_window: 131072
-    max_output_tokens: 8192
-    default_reasoning_level: medium
-    supported_reasoning_levels: [low, medium, high]
 ```
 
-3. Asignalo a un tier en `tiers` (ej. `sonnet: qwen-coder`) y reiniciá.
+3. Asignalo a un tier en `tiers` (ej. `sonnet: qwen-coder-plus-latest`) y reiniciá.
 
 ### Formato del nombre de modelo
 
@@ -166,7 +173,47 @@ LiteLLM usa un prefijo `litellm_provider/model` para saber cómo hablar con el b
 
 ### Validación al arrancar
 
-`start-router.sh` valida `models.yaml` antes de levantar nada: que los tres tiers existan y apunten a backends válidos, que cada backend cite un proveedor con clave, y que el `reasoning_effort` de Codex esté soportado por su tier. Si algo falla, te dice exactamente qué corregir.
+`start-router.sh` valida `models.yaml` antes de levantar nada: que los tres tiers existan y apunten a backends válidos, que cada backend cite un proveedor con clave, que la clave de cada backend coincida con su campo `model` si está definido, y que el `reasoning_effort` de Codex esté soportado por su tier. Si algo falla, te dice exactamente qué corregir.
+
+## Visión (imágenes)
+
+El router deriva automáticamente los requests con imagen al modelo multimodal
+**GLM-5V-Turbo** de z.ai, sin tocar el cliente. Claude Code sigue mandando su
+tier (`opus`/`sonnet`/`haiku`) por `/v1/messages`; el hook pre-call de LiteLLM
+(`litellm_patches.py`) detecta bloques `type: "image"` en el historial y
+reescribe el modelo al alias `vision` **antes** del routing, con lo que el
+request sale por el deployment de visión (con su `api_base` y clave propios).
+LiteLLM convierte los bloques Anthropic a `image_url` de OpenAI al despachar.
+
+Configuración en `models.yaml` (sección opcional — quitá `vision:` para
+desactivar el reroute y volver a texto puro):
+
+```yaml
+backends:
+  glm-5v-turbo:                              # clave = id del modelo en z.ai
+    provider: zai
+    api_base: https://api.z.ai/api/paas/v4   # override per-backend del provider
+    litellm_provider: openai                 # GLM-5V solo tiene endpoint OpenAI
+    display_name: "GLM 5V Turbo (Z.AI)"
+    description: "Vision multimodal para los turns con imagen"
+
+vision:
+  backend: glm-5v-turbo
+```
+
+Notas:
+
+- El escaneo cubre **todo el historial**, no solo el último turno: Claude Code
+  reenvía la conversación completa, y una imagen vieja haría 400 en DeepSeek
+  (texto puro) si el turno volviera al tier de texto. GLM-5V-Turbo tiene el
+  mismo contexto que GLM 5.3 (200K), así que no hay pérdida.
+- Los límites de imagen los impone z.ai (~5 MB, JPEG/PNG/GIF/WebP); si falla,
+  el error 1210 (图片输入格式) llega directo del backend.
+- Codex/Moon Bridge no manda imágenes, así que el camino Codex queda como está.
+- Detalle de LiteLLM: el endpoint `/v1/messages` despacha los backends
+  `openai/*` por el Responses API, que z.ai no tiene (404 en `/v4/responses`).
+  `litellm_patches.py` setea `use_chat_completions_url_for_anthropic_messages`
+  para forzar `/chat/completions` en esos deployments.
 
 ## Troubleshooting
 

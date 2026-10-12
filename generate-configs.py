@@ -32,6 +32,9 @@ CANONICAL = {
 MOON_VERSION = "2023-06-01"
 MOON_UA = "moonbridge/1.0"
 MAX_TOKENS = 65536
+# Alias del deployment de vision en config.yaml; el hook de litellm_patches.py
+# reroutea a este nombre cuando un request trae bloques de imagen.
+VISION_ALIAS = "vision"
 
 
 def die(msg):
@@ -56,6 +59,25 @@ def load_models(path):
     if not isinstance(data, dict):
         die(f"{p}: se esperaba un mapa en la raiz.")
     return data
+
+
+def provider_defaults(data, pname):
+    """Defaults de metadatos declarados bajo el provider (clave 'defaults')."""
+    pv = data.get("providers", {}).get(pname) or {}
+    d = pv.get("defaults")
+    return d if isinstance(d, dict) else {}
+
+
+def effective_backend(data, bname):
+    """Backend con los defaults del provider fusionados por debajo (gana el
+    backend) y 'model' resuelto a la clave cuando no se define.
+    Convencion: la clave del backend ES el id exacto del modelo en el proveedor;
+    asi el nombre nunca diverge del modelo servido y se valida al arrancar."""
+    b = data["backends"][bname]
+    merged = dict(provider_defaults(data, b.get("provider")))
+    merged.update(b)
+    merged["model"] = merged.get("model") or bname
+    return merged
 
 
 def validate(data):
@@ -87,8 +109,21 @@ def validate(data):
         if prov not in providers:
             die(f"backend '{bname}' usa provider '{prov}' que no esta en 'providers' "
                 f"(disponibles: {', '.join(sorted(providers))}).")
-        if not b.get("model"):
-            die(f"backend '{bname}' no tiene 'model'.")
+        if "model" in b and b["model"] != bname:
+            die(f"backend '{bname}': model='{b['model']}' no coincide con la clave. "
+                f"La clave del backend debe ser el id exacto del modelo en el "
+                f"proveedor (o omitir 'model').")
+
+    vision = data.get("vision") or {}
+    vname = vision.get("backend")
+    if vname:
+        if vname not in backends:
+            die(f"vision.backend='{vname}' pero ese backend no existe en "
+                f"'backends' (disponibles: {', '.join(sorted(backends))}).")
+        vprov = backends[vname].get("provider")
+        if vprov not in providers:
+            die(f"vision backend '{vname}' usa provider '{vprov}' que no esta "
+                f"en 'providers'.")
 
     for pname, pv in providers.items():
         if is_placeholder(pv.get("api_key", "")):
@@ -106,11 +141,12 @@ def validate(data):
         die(f"codex.default_tier='{default_tier}' no es un tier valido {TIERS}.")
     effort = codex.get("reasoning_effort")
     if effort:
-        b = backends[tiers[default_tier]]
+        tname = tiers[default_tier]
+        b = effective_backend(data, tname)
         levels = b.get("supported_reasoning_levels") or []
         if effort not in levels:
             die(f"codex.reasoning_effort='{effort}' no esta soportado por el backend "
-                f"'{tiers[default_tier]}' (niveles: {levels}).")
+                f"'{tname}' (niveles: {levels}).")
 
 
 def resolve(data):
@@ -118,11 +154,11 @@ def resolve(data):
     backends = data["backends"]
     tiers = data["tiers"]
 
-    # tier -> (backend_name, backend, provider)
+    # tier -> (backend_name, backend_efectivo, provider)
     resolved = {}
     for t in TIERS:
         bname = tiers[t]
-        b = backends[bname]
+        b = effective_backend(data, bname)
         pv = providers[b["provider"]]
         # Limite de concurrencia/tasa: el backend puede sobreescribir al provider.
         mpr = b.get("max_parallel_requests", pv.get("max_parallel_requests"))
@@ -133,11 +169,32 @@ def resolve(data):
             "litellm_provider": b.get("litellm_provider", "anthropic"),
             "provider": b["provider"],
             "api_key": pv["api_key"],
-            "api_base": pv["api_base"],
+            "api_base": b.get("api_base", pv["api_base"]),
             "max_parallel_requests": mpr,
             "rpm": rpm,
         }
     return resolved
+
+
+def resolve_vision(data):
+    """Resuelve la seccion opcional 'vision' -> dict de deployment o None."""
+    vision = data.get("vision") or {}
+    vname = vision.get("backend")
+    if not vname:
+        return None
+    b = data["backends"][vname]
+    pv = data["providers"][b["provider"]]
+    return {
+        "backend": vname,
+        "model": b.get("model", vname),
+        "litellm_provider": b.get("litellm_provider", "anthropic"),
+        "provider": b["provider"],
+        "api_key": pv["api_key"],
+        "api_base": b.get("api_base", pv["api_base"]),
+        "max_parallel_requests": b.get(
+            "max_parallel_requests", pv.get("max_parallel_requests")),
+        "rpm": b.get("rpm", pv.get("rpm")),
+    }
 
 
 def build_litellm_config(data, resolved):
@@ -159,6 +216,22 @@ def build_litellm_config(data, resolved):
         for alias in (CANONICAL[t], t):
             model_list.append({"model_name": alias, "litellm_params": dict(base)})
 
+    # Deployment de vision (alias "vision"): destino del reroute de imagenes.
+    # El hook pre-call de litellm_patches.py reescribe model -> "vision" cuando
+    # el historial trae bloques de imagen (config via LLMROUTER_VISION_MODEL).
+    vis = resolve_vision(data)
+    if vis:
+        vbase = {
+            "model": f"{vis['litellm_provider']}/{vis['model']}",
+            "api_key": vis["api_key"],
+            "api_base": vis["api_base"],
+        }
+        if vis.get("max_parallel_requests") is not None:
+            vbase["max_parallel_requests"] = int(vis["max_parallel_requests"])
+        if vis.get("rpm") is not None:
+            vbase["rpm"] = int(vis["rpm"])
+        model_list.append({"model_name": VISION_ALIAS, "litellm_params": vbase})
+
     # (1) Reintentos con backoff: absorbe los rate-limit transitorios antes de
     # propagarlos a Claude Code. retry_policy reintenta especificamente los 429.
     num_retries = int(router.get("num_retries", 3))
@@ -171,9 +244,24 @@ def build_litellm_config(data, resolved):
         "retry_policy": {
             "RateLimitErrorRetries": num_retries,
             "TimeoutErrorRetries": num_retries,
-            "InternalServerErrorRetries": 1,
+            "InternalServerErrorRetries": num_retries,
         },
     }
+
+    # Fallbacks: cuando un tier da error (rate-limit, timeout), el proxy
+    # reintenta automaticamente contra el tier de fallback.
+    fallbacks_cfg = router.get("fallbacks") or {}
+    if fallbacks_cfg:
+        fallback_list = []
+        for source_tier, target_tier in fallbacks_cfg.items():
+            if source_tier not in TIERS or target_tier not in TIERS:
+                print(f"[generate-configs] WARNING: fallback '{source_tier}' -> "
+                      f"'{target_tier}' ignora tiers desconocidos.", file=sys.stderr)
+                continue
+            fallback_list.append({CANONICAL[source_tier]: [CANONICAL[target_tier]]})
+            fallback_list.append({source_tier: [target_tier]})
+        if fallback_list:
+            router_settings["fallbacks"] = fallback_list
 
     return {
         "model_list": model_list,
@@ -222,7 +310,7 @@ def build_moonbridge_config(data, resolved, data_dir):
             used_backends.append(bname)
 
     for bname in used_backends:
-        b = backends[bname]
+        b = effective_backend(data, bname)
         entry = {
             "context_window": int(b.get("context_window", 200000)),
             "max_output_tokens": int(b.get("max_output_tokens", 128000)),
@@ -242,7 +330,7 @@ def build_moonbridge_config(data, resolved, data_dir):
     # providers usados con sus offers
     providers_cfg = {}
     for t in TIERS:
-        b = backends[tiers[t]]
+        b = effective_backend(data, tiers[t])
         pname = b["provider"]
         providers_cfg.setdefault(pname, set()).add(b["model"])
 
@@ -259,14 +347,15 @@ def build_moonbridge_config(data, resolved, data_dir):
 
     routes_out = {}
     for t in TIERS:
-        b = backends[tiers[t]]
+        b = effective_backend(data, tiers[t])
         routes_out[t] = {"model": b["model"], "provider": b["provider"]}
 
     codex = data.get("codex") or {}
     router = data.get("router") or {}
     moon_host = router.get("host", "127.0.0.1")
     moon_port = int(codex.get("port", 4001))
-    any_extension = any(backends[bn].get("extension") for bn in used_backends)
+    any_extension = any(
+        effective_backend(data, bn).get("extension") for bn in used_backends)
 
     extensions_block = {}
     if any_extension:
@@ -332,6 +421,8 @@ def build_router_env(data):
         f"CODEX_DEFAULT_MODEL={shell_quote(codex.get('default_tier', 'opus'))}",
         f"CODEX_REASONING_EFFORT={shell_quote(codex.get('reasoning_effort', 'xhigh'))}",
     ]
+    if resolve_vision(data):
+        lines.append(f"LLMROUTER_VISION_MODEL={shell_quote(VISION_ALIAS)}")
     return "\n".join(lines) + "\n"
 
 
@@ -364,6 +455,10 @@ def main():
         r = resolved[t]
         print(f"  {t:6} -> {r['backend']} "
               f"({r['litellm_provider']}/{r['model']} @ {r['provider']})")
+    vis = resolve_vision(data)
+    if vis:
+        print(f"  vision -> {vis['backend']} "
+              f"({vis['litellm_provider']}/{vis['model']} @ {vis['provider']})")
     print(f"  codex default tier: {data.get('codex', {}).get('default_tier', 'opus')}")
     print(f"  -> {args.config}")
     print(f"  -> {args.moon}")

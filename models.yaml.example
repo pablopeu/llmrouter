@@ -4,6 +4,11 @@
 #
 # Para reasignar que modelo es opus / sonnet / haiku, edita SOLO "tiers" y reinicia
 # con restart-router.sh. Ambos caminos (Claude y Codex) se actualizan a la vez.
+#
+# CONVENCION: la clave de cada backend es el ID EXACTO del modelo en el proveedor
+# (el campo "model" es opcional y debe coincidir si se define — se valida al
+# arrancar). Los metadatos repetibles van en providers.<p>.defaults y todo
+# backend de ese proveedor los hereda.
 
 providers:
   zai:
@@ -14,65 +19,82 @@ providers:
     # por backend (sobreescribe al provider). Omitir = sin limite.
     max_parallel_requests: 2
     # rpm: 60
+    defaults:
+      context_window: 200000
+      max_output_tokens: 128000
+      default_reasoning_level: medium
+      supported_reasoning_levels: [low, medium, high]
   deepseek:
     api_base: https://api.deepseek.com/anthropic
     api_key: your-deepseek-api-key
+    defaults:
+      context_window: 1000000
+      max_output_tokens: 384000
+      default_reasoning_level: high
+      supported_reasoning_levels: [high, xhigh]
+      supports_reasoning_summaries: true
+      default_reasoning_summary: auto
+      extension: deepseek_v4
 
 backends:
-  glm-52:
+  glm-5.3:
     provider: zai
-    model: glm-5.2
-    display_name: "GLM 5.2 (Z.AI)"
-    description: "GLM 5.2 via Z.AI (endpoint Anthropic)"
-    context_window: 200000
-    max_output_tokens: 128000
-    default_reasoning_level: medium
-    supported_reasoning_levels: [low, medium, high]
+    display_name: "GLM 5.3 (Z.AI)"
+    description: "GLM 5.3 via Z.AI (endpoint Anthropic)"
+
+  glm-5.3-flash:
+    provider: zai
+    display_name: "GLM 5.3 Flash (Z.AI)"
+    description: "GLM 5.3 Flash via Z.AI — rapido"
+
+  glm-5v-turbo:
+    provider: zai
+    # Override del provider: GLM-5V-Turbo solo existe en el endpoint
+    # OpenAI-compatible de z.ai (no el /api/anthropic).
+    api_base: https://api.z.ai/api/paas/v4
+    litellm_provider: openai
+    display_name: "GLM 5V Turbo (Z.AI)"
+    description: "Vision multimodal para los turns con imagen"
 
   deepseek-v4-pro:
     provider: deepseek
-    model: deepseek-v4-pro
     display_name: "DeepSeek V4 Pro"
     description: "DeepSeek V4 Pro — maximo razonamiento"
-    context_window: 1000000
-    max_output_tokens: 384000
-    default_reasoning_level: high
-    supported_reasoning_levels: [high, xhigh]
-    supports_reasoning_summaries: true
-    default_reasoning_summary: auto
-    extension: deepseek_v4
 
-  deepseek-v4-flash:
+  deepseek-flash:
     provider: deepseek
-    model: deepseek-v4-flash
-    display_name: "DeepSeek V4 Flash"
-    description: "DeepSeek V4 Flash — rapido y barato"
-    context_window: 1000000
-    max_output_tokens: 384000
-    default_reasoning_level: high
-    supported_reasoning_levels: [high, xhigh]
-    supports_reasoning_summaries: true
-    default_reasoning_summary: auto
-    extension: deepseek_v4
+    display_name: "DeepSeek V4.1 Flash"
+    description: "DeepSeek V4.1 Flash (id del proveedor: deepseek-flash) — rapido y barato"
+
+# Vision (opcional): backend al que se deriva cualquier request con imagen.
+# El hook pre-call de LiteLLM reescribe el modelo al alias "vision" cuando el
+# historial trae bloques de imagen. Quita esta seccion para desactivarlo.
+vision:
+  backend: glm-5v-turbo
 
 # ASIGNACION DE TIERS — edita esto para reasignar el mejor / intermedio / barato.
-# El valor es el nombre de un backend definido arriba.
+# El valor es la clave de un backend (= id del modelo) definido arriba.
 tiers:
-  opus: glm-52              # el mejor
-  sonnet: deepseek-v4-pro   # intermedio
-  haiku: deepseek-v4-flash  # barato / rapido
+  opus: glm-5.3              # el mejor
+  sonnet: glm-5.3-flash      # intermedio
+  haiku: deepseek-flash   # barato / rapido (DeepSeek V4.1 Flash)
 
 router:
   host: 127.0.0.1
   port: 4000
   master_key: sk-local-llmrouter-change-me
-  # Opcional: reintentos ante rate-limit/timeout transitorios antes de propagar
-  # el error a Claude Code. retry_after = segundos base de backoff.
-  num_retries: 3
-  retry_after: 5
-  cooldown_time: 15
+  # Sin retries antes del fallback: si el provider primario falla, se usa el
+  # fallback de inmediato (failover rapido, no esperar ~10 retries).
+  num_retries: 0
+  retry_after: 1
+  cooldown_time: 30
+  # Fallbacks opcionales: tier -> tier de respaldo. Unidireccional a proposito:
+  # NO poner haiku: sonnet (crea un loop sonnet->haiku->sonnet con max_fallbacks=5).
+  fallbacks:
+    opus: haiku
+    sonnet: haiku
 
 codex:
   port: 4001
   default_tier: sonnet      # tier que usa Codex por defecto (ruta de Moon Bridge)
-  reasoning_effort: xhigh   # debe existir en supported_reasoning_levels del tier elegido
+  reasoning_effort: high    # debe existir en supported_reasoning_levels del tier elegido

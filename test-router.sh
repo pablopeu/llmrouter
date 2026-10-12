@@ -116,6 +116,46 @@ test_model "opus" "Opus tier"
 test_model "sonnet" "Sonnet tier"
 test_model "haiku" "Haiku tier"
 
+# 3b) Test de vision: request con imagen al tier sonnet; el hook debe reroutear
+# al alias "vision" (GLM-5V-Turbo). PNG de 1px en base64.
+echo ""
+echo "--- Test de vision (reroute imagen -> GLM-5V-Turbo) ---"
+PNG_1PX="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/v1/messages" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: ${LITELLM_MASTER_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -d "{\"model\":\"sonnet\",\"max_tokens\":512,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"${PNG_1PX}\"}},{\"type\":\"text\",\"text\":\"Describe esta imagen en una palabra.\"}]}]}" \
+    --max-time 60 2>/dev/null || echo -e "\n000")
+
+HTTP_CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+
+if [ "$HTTP_CODE" = "200" ]; then
+    CONTENT=$(echo "$BODY" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    blocks = d.get('content', [])
+    texts = [b.get('text','') for b in blocks if b.get('type') == 'text']
+    print(texts[0][:60] if texts else '(sin texto)')
+except Exception:
+    print('(respuesta no parseable)')
+" 2>/dev/null)
+    info "Vision reroute HTTP 200 - $CONTENT"
+else
+    ERR=$(echo "$BODY" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    e = d.get('error', {})
+    print(e.get('message', str(d))[:120])
+except Exception:
+    print('error desconocido')
+" 2>/dev/null || echo "HTTP $HTTP_CODE")
+    fail "Vision reroute HTTP $HTTP_CODE - $ERR"
+fi
+
 echo ""
 echo "--- Test Codex adapter (OpenAI /v1/responses) ---"
 RESP=$(curl -s -w "\n%{http_code}" "$CODEX_BASE/v1/responses" \
