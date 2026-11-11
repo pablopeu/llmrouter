@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-"$SCRIPT_DIR/stop-router.sh"
-sleep 1
-"$SCRIPT_DIR/start-router.sh"
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec "$SCRIPT_DIR/llmrouter" restart "$@"

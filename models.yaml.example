@@ -2,8 +2,7 @@
 # Copia este archivo a models.yaml y completa tus claves:
 #   cp models.yaml.example models.yaml && chmod 600 models.yaml
 #
-# Para reasignar que modelo es opus / sonnet / haiku, edita SOLO "tiers" y reinicia
-# con restart-router.sh. Ambos caminos (Claude y Codex) se actualizan a la vez.
+# Para reasignar modelos, edita tiers y ejecuta llmrouter restart.
 #
 # CONVENCION: la clave de cada backend es el ID EXACTO del modelo en el proveedor
 # (el campo "model" es opcional y debe coincidir si se define — se valida al
@@ -70,7 +69,8 @@ backends:
 # El hook pre-call de LiteLLM reescribe el modelo al alias "vision" cuando el
 # historial trae bloques de imagen. Quita esta seccion para desactivarlo.
 vision:
-  backend: glm-5v-turbo
+  backend: deepseek-flash
+  fallback: glm-5v-turbo
 
 # ASIGNACION DE TIERS — edita esto para reasignar el mejor / intermedio / barato.
 # El valor es la clave de un backend (= id del modelo) definido arriba.
@@ -93,8 +93,3 @@ router:
   fallbacks:
     opus: haiku
     sonnet: haiku
-
-codex:
-  port: 4001
-  default_tier: sonnet      # tier que usa Codex por defecto (ruta de Moon Bridge)
-  reasoning_effort: high    # debe existir en supported_reasoning_levels del tier elegido

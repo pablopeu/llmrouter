@@ -3,12 +3,17 @@ Description=LLMRouter local LiteLLM proxy
 After=network.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=exec
 WorkingDirectory=%h/llmrouter
-EnvironmentFile=%h/llmrouter/.env
-ExecStart=%h/llmrouter/start-router.sh
-ExecStop=/usr/bin/env LLMROUTER_SKIP_SYSTEMD_STOP=1 %h/llmrouter/stop-router.sh
+EnvironmentFile=-%h/llmrouter/.env
+ExecStart=%h/llmrouter/.venv/bin/python %h/llmrouter/routerctl.py run
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=120
+KillMode=mixed
+UMask=0077
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

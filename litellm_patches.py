@@ -34,28 +34,27 @@ de imagen en el historial y reescribe el modelo a ese alias ANTES del routing:
 Claude Code sigue mandando su tier (opus/sonnet/haiku) y el request sale por
 el modelo multimodal sin tocar el cliente. Sin la env var, el hook no toca nada.
 
-Sonda de imagenes (diagnostico, opcional)
------------------------------------------
-Activada con LLMROUTER_PROBE_IMAGES=1. Solo loguea (read-only, nunca modifica
-el request) cualquier URL firmada / imageSource que cruce el router hacia el
-backend, con repr() exacto para detectar mangling de '+' -> espacio en la
-Signature del CDN de z.ai (sospecha del error 1210 图片输入格式/解析错误).
-
-Dos resultados posibles, ambos diagnosticos:
-  - loguea una URL con '+'  -> el router la reenvia intacta; el break esta
-    en el fetch que hace z.ai de su propio CDN.
-  - no loguea ninguna URL    -> la imagen viaja como base64 (o z.ai genera la
-    URL firmada server-side); el router nunca la toca.
-En ambos casos exonera al router. Salida: logs/image_probe.log.
+El pipeline normaliza historial MCP, conserva bloques huerfanos como texto
+historico y aisla thinking por cuenta, modelo, contexto y respuesta. Las cuotas
+1308 activan un cooldown local breve sin interpretar fechas del proveedor.
 """
 from __future__ import annotations
 
-import logging
+import json
+import copy
+import functools
+import inspect
+import hashlib
 import os
+import threading
+import time
 import uuid
 
 from litellm.integrations.custom_logger import CustomLogger
 import litellm
+
+from deepseek_thinking import deepseek_thinking_handler
+from router_logging import get_logger
 
 # El endpoint /v1/messages de LiteLLM despacha los backends openai/* por el
 # Responses API; z.ai solo expone /chat/completions y responde 404 en
@@ -63,48 +62,7 @@ import litellm
 # deployments openai/azure (los anthropic/* no se ven afectados).
 litellm.use_chat_completions_url_for_anthropic_messages = True
 
-logger = logging.getLogger("litellm_patches")
-try:
-    _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-    os.makedirs(_log_dir, exist_ok=True)
-    _fh = logging.FileHandler(os.path.join(_log_dir, "litellm_patches.log"))
-    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(_fh)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-except Exception:
-    pass
-
-
-# --- Sonda de imagenes (diagnostico, gated por LLMROUTER_PROBE_IMAGES) -----
-_PROBE_LOGGER = logging.getLogger("litellm_patches.image_probe")
-try:
-    _probe_fh = logging.FileHandler(os.path.join(_log_dir, "image_probe.log"))
-    _probe_fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    _PROBE_LOGGER.addHandler(_probe_fh)
-    _PROBE_LOGGER.setLevel(logging.INFO)
-    _PROBE_LOGGER.propagate = False
-except Exception:
-    pass
-
-
-def _walk_strings(obj: Any, path: str = "$") -> Iterable[tuple]:
-    """Itera (path, str) por cada string dentro de una estructura dict/list."""
-    if isinstance(obj, str):
-        yield path, obj
-    elif isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from _walk_strings(v, f"{path}.{k}")
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            yield from _walk_strings(v, f"{path}[{i}]")
-
-
-# Subcadenas que delatan una URL firmada del CDN de z.ai o el arg imageSource.
-_IMAGE_TELLTALES = (
-    "Signature=", "imageSource", "ufileos.com",
-    "screen.png", "UCloudPublicKey",
-)
+logger = get_logger("litellm_patches")
 
 
 def _patch_thinking_error_detection() -> None:
@@ -256,6 +214,77 @@ def _patch_anthropic_thinking_retry_transform() -> None:
 _patch_anthropic_thinking_retry_transform()
 
 
+def _normalize_mcp_history(messages):
+    """Representa el historial MCP sin crear llamadas de cliente pendientes.
+
+    Los backends compatibles no aceptan mcp_tool_use/mcp_tool_result. Ambos
+    pueden estar en el mismo turno assistant, por lo que renombrarlos a
+    tool_use/tool_result viola la adyacencia exigida por DeepSeek. Conservamos
+    sus metadatos como texto JSON y los resultados como bloques de contenido,
+    incluidas las imagenes, antes de reparar herramientas y elegir vision.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    converted = 0
+
+    def normalize_content(content):
+        nonlocal converted
+        if not isinstance(content, list):
+            return content
+        normalized = []
+        for block in content:
+            if not isinstance(block, dict):
+                normalized.append(block)
+                continue
+            block_type = block.get("type")
+            if block_type in ("mcp_tool_use", "mcp_tool_result"):
+                converted += 1
+                metadata = dict(block)
+                result_content = None
+                if block_type == "mcp_tool_result" and isinstance(
+                    metadata.get("content"), list
+                ):
+                    result_content = metadata.pop("content")
+                text_block = {
+                    "type": "text",
+                    "text": (
+                        "[Historical MCP block; not a pending client tool call]\n"
+                        + json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+                    ),
+                }
+                if "cache_control" in block:
+                    text_block["cache_control"] = block["cache_control"]
+                normalized.append(text_block)
+                if result_content is not None:
+                    normalized.extend(normalize_content(result_content))
+            elif block_type == "tool_result" and isinstance(block.get("content"), list):
+                normalized.append({**block, "content": normalize_content(block["content"])})
+            else:
+                normalized.append(block)
+        return normalized
+
+    normalized_messages = [
+        {**message, "content": normalize_content(message["content"])}
+        if isinstance(message, dict) and "content" in message else message
+        for message in messages
+    ]
+    if converted:
+        logger.info("MCP history: normalizados %d bloques para backends compatibles.", converted)
+    return normalized_messages
+
+
+def _historical_blocks(block):
+    metadata = dict(block)
+    content = metadata.pop("content") if isinstance(metadata.get("content"), list) else []
+    result = [{"type": "text", "text": "[Historical tool block; not pending]\n" +
+               json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))}]
+    result.extend(content)
+    if "cache_control" in block:
+        result[-1] = {**result[-1], "cache_control": block["cache_control"]}
+    return result
+
+
 def _repair_tool_adjacency(messages):
     """Repara la adyacencia tool_use/tool_result que exigen backends estrictos.
 
@@ -267,9 +296,8 @@ def _repair_tool_adjacency(messages):
 
     Regla (no-op sobre conversaciones validas: Anthropic ya exige la adyacencia
     y Claude Code la cumple):
-      - tool_use sin su tool_result en el mensaje siguiente -> se elimina (el
-        turno queda coherente: es como si el modelo no hubiera llamado la tool).
-      - tool_result sin su tool_use en el mensaje anterior -> se elimina.
+      - Los bloques sin pareja inmediata pasan a texto historico.
+      - Se preservan argumentos, resultados e imagenes sin llamadas pendientes.
     """
     if not isinstance(messages, list):
         return messages
@@ -304,17 +332,18 @@ def _repair_tool_adjacency(messages):
                 results = _tr_ids(ncontent)
         orphan = tu_ids - results
         if orphan:
-            msg["content"] = [
-                b for b in content
-                if not (isinstance(b, dict) and b.get("type") == "tool_use"
-                        and b.get("id") in orphan)
-            ]
+            repaired = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") in orphan:
+                    repaired.extend(_historical_blocks(block))
+                else:
+                    repaired.append(block)
+            msg["content"] = repaired
             if not msg["content"]:  # DeepSeek rechaza mensajes con content vacio
                 msg["content"] = [{"type": "text", "text": ""}]
             logger.info(
-                "tool adjacency: eliminados %d tool_use sin tool_result "
-                "adyacente (ids=%s).",
-                len(orphan), sorted(orphan),
+                "tool adjacency: preservados como historial %d tool_use sin resultado adyacente.",
+                len(orphan),
             )
 
     for i, msg in enumerate(messages):
@@ -334,19 +363,75 @@ def _repair_tool_adjacency(messages):
                 tu_ids = _tu_ids(pcontent)
         orphan_tr = tr_ids - tu_ids
         if orphan_tr:
-            msg["content"] = [
-                b for b in content
-                if not (isinstance(b, dict) and b.get("type") == "tool_result"
-                        and b.get("tool_use_id") in orphan_tr)
-            ]
+            repaired = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in orphan_tr:
+                    repaired.extend(_historical_blocks(block))
+                else:
+                    repaired.append(block)
+            msg["content"] = repaired
             if not msg["content"]:  # DeepSeek rechaza mensajes con content vacio
                 msg["content"] = [{"type": "text", "text": ""}]
             logger.info(
-                "tool adjacency: eliminados %d tool_result huerfanos (ids=%s).",
-                len(orphan_tr), sorted(orphan_tr),
+                "tool adjacency: preservados como historial %d tool_result huerfanos.",
+                len(orphan_tr),
             )
 
     return messages
+
+
+_QUOTA_BLOCKED = {}
+_QUOTA_LOCK = threading.Lock()
+
+
+def _patch_request_pipeline():
+    from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+
+    original = BaseLLMHTTPHandler.async_anthropic_messages_handler
+    if getattr(original, "_llmrouter_pipeline", False):
+        return
+    signature = inspect.signature(original)
+
+    @functools.wraps(original)
+    async def wrapped(self, *arguments, **keywords):
+        bound = signature.bind(self, *arguments, **keywords)
+        values = bound.arguments
+        api_base = values.get("api_base") or "https://api.anthropic.com"
+        credential = hashlib.sha256((values.get("api_key") or "").encode()).hexdigest()
+        account = (api_base.rstrip("/"), credential)
+        with _QUOTA_LOCK:
+            now = time.monotonic()
+            for key in list(_QUOTA_BLOCKED):
+                if _QUOTA_BLOCKED[key] <= now:
+                    del _QUOTA_BLOCKED[key]
+            blocked = account in _QUOTA_BLOCKED
+        if blocked:
+            raise litellm.RateLimitError(
+                message="Proveedor en cooldown temporal por cuota 1308 agotada; se intenta fallback.",
+                llm_provider="anthropic", model=values["model"],
+            )
+        messages = _normalize_mcp_history(copy.deepcopy(values["messages"]))
+        _repair_tool_adjacency(messages)
+        values["messages"] = deepseek_thinking_handler.prepare_request(
+            values["model"], api_base, values.get("api_key"),
+            values.get("anthropic_messages_optional_request_params") or {},
+            messages, values["logging_obj"],
+        )
+        try:
+            return await original(*bound.args, **bound.kwargs)
+        except Exception as error:
+            if getattr(error, "status_code", None) == 429 and "1308" in str(error):
+                with _QUOTA_LOCK:
+                    if len(_QUOTA_BLOCKED) < 64:
+                        _QUOTA_BLOCKED[account] = time.monotonic() + 300
+                logger.info("Cuota 1308: cuenta en cooldown durante 300 segundos.")
+            raise
+
+    wrapped._llmrouter_pipeline = True
+    BaseLLMHTTPHandler.async_anthropic_messages_handler = wrapped
+
+
+_patch_request_pipeline()
 
 
 def _patch_web_search_cost_tracker() -> None:
@@ -401,9 +486,43 @@ def _patch_web_search_cost_tracker() -> None:
 _patch_web_search_cost_tracker()
 
 
+def _move_assistant_images(messages):
+    """Mantiene imagenes historicas y las ubica en el proximo turno user."""
+    if not isinstance(messages, list):
+        return messages
+    result = copy.deepcopy(messages)
+    index = 0
+    while index < len(result):
+        message = result[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant" or not isinstance(message.get("content"), list):
+            index += 1
+            continue
+        images = [block for block in message["content"] if isinstance(block, dict) and block.get("type") == "image"]
+        if not images:
+            index += 1
+            continue
+        message["content"] = [block if not isinstance(block, dict) or block.get("type") != "image"
+                              else {"type": "text", "text": "[Historical image moved to the next user message.]"}
+                              for block in message["content"]]
+        if index + 1 == len(result) or not isinstance(result[index + 1], dict) or result[index + 1].get("role") != "user":
+            result.insert(index + 1, {"role": "user", "content": []})
+        following = result[index + 1]
+        content = following.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            raise ValueError("Contenido de usuario incompatible con imagen historica")
+        position = 0
+        while position < len(content) and isinstance(content[position], dict) and content[position].get("type") == "tool_result":
+            position += 1
+        following["content"] = content[:position] + images + content[position:]
+        index += 1
+    return result
+
+
 class _PatchesLogger(CustomLogger):
     """CustomLogger que aplica los parches de modulo, reroutea los requests con
-    imagen al modelo de vision y, opcionalmente, sonda el body del request.
+    imagen al modelo de vision y conserva thinking entre turnos.
 
     Reroute de vision: si LLMROUTER_VISION_MODEL esta seteado (generate-configs
     lo escribe cuando models.yaml define seccion 'vision') y el historial trae
@@ -412,9 +531,7 @@ class _PatchesLogger(CustomLogger):
     key propios). LiteLLM convierte los bloques Anthropic {"type":"image"} a
     image_url de OpenAI al despachar al deployment openai/*.
 
-    Sonda de imagenes: solo se activa con LLMROUTER_PROBE_IMAGES=1 y es
-    estrictamente read-only. Los parches viven a nivel de modulo y se aplican
-    al importarse.
+    Los parches viven a nivel de modulo y se aplican al importarse.
     """
 
     @staticmethod
@@ -424,23 +541,34 @@ class _PatchesLogger(CustomLogger):
         completo, por eso se escanea todo y no solo el ultimo turno)."""
         if not isinstance(messages, list):
             return False
+        def has_image(content):
+            if not isinstance(content, list):
+                return False
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") in ("image", "image_url"):
+                    return True
+                if block.get("type") in ("tool_result", "mcp_tool_result") and has_image(block.get("content")):
+                    return True
+            return False
+
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
-            for block in content:
-                if isinstance(block, dict) and block.get("type") in (
-                    "image", "image_url",
-                ):
-                    return True
+            if has_image(content):
+                return True
         return False
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         """Repara la adyacencia tool_use/tool_result (400 de DeepSeek en el
-        fallback); reroutea requests con imagen al modelo de vision; luego la
-        sonda read-only de URLs firmadas / imageSource."""
+        fallback) y reroutea requests con imagen al modelo de vision."""
+        if call_type == "anthropic_messages" and isinstance(data, dict) and "messages" in data:
+            data["messages"] = _normalize_mcp_history(copy.deepcopy(data["messages"]))
+
         try:
             if isinstance(data, dict):
                 _repair_tool_adjacency(data.get("messages"))
@@ -459,13 +587,17 @@ class _PatchesLogger(CustomLogger):
                         "vision reroute: %s -> %s (request con bloques de imagen)",
                         orig, vision_model,
                     )
+                if data.get("model") == vision_model and os.environ.get("LLMROUTER_VISION_USER_IMAGES") == "1":
+                    data["messages"] = _move_assistant_images(data.get("messages"))
         except Exception as e:  # nunca romper el request
             logger.warning("vision reroute fallo (no rompe el request): %s", e)
 
-        if os.environ.get("LLMROUTER_PROBE_IMAGES", "").lower() not in (
-            "1", "true", "yes", "on"
-        ):
-            return data
+        return data
+
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        await deepseek_thinking_handler.async_log_success_event(
+            kwargs, response_obj, start_time, end_time,
+        )
 
 
 # Instancia a nivel de modulo (LiteLLM la resuelve via get_instance_fn).

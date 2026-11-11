@@ -1,160 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/.venv"
-MODELS_YAML="$SCRIPT_DIR/models.yaml"
-MODELS_EXAMPLE="$SCRIPT_DIR/models.yaml.example"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*"; }
-
-# --- models.yaml ---
-if [ ! -f "$MODELS_YAML" ]; then
-    cp "$MODELS_EXAMPLE" "$MODELS_YAML"
-    chmod 600 "$MODELS_YAML"
-    info "Creado models.yaml desde models.yaml.example con permisos 600."
-    warn "DEBES editar $MODELS_YAML con tus API keys antes de arrancar el router."
-    MUST_EDIT=1
-else
-    chmod 600 "$MODELS_YAML"
-    info "models.yaml ya existe, permisos 600 asegurados."
-    MUST_EDIT=0
+umask 077
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+if ! command -v systemctl >/dev/null || ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "Se requiere systemd --user. Alternativa en primer plano: .venv/bin/python routerctl.py run" >&2
+    exit 1
 fi
-
-# --- venv ---
-if [ ! -d "$VENV_DIR" ]; then
-    info "Creando virtualenv en $VENV_DIR ..."
-    python3 -m venv "$VENV_DIR"
-else
-    info "Virtualenv ya existe en $VENV_DIR."
+if [ ! -f "$SCRIPT_DIR/models.yaml" ]; then
+    cp "$SCRIPT_DIR/models.yaml.example" "$SCRIPT_DIR/models.yaml"
 fi
-
-# --- instalar litellm ---
-info "Instalando litellm[proxy] en el venv ..."
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet 'litellm[proxy]!=1.82.7,!=1.82.8'
-info "litellm instalado: $("$VENV_DIR/bin/python" -c 'import litellm; print(litellm.__version__)' 2>/dev/null || echo 'version desconocida')"
-
-# --- compilar Moon Bridge ---
-MOON_BIN="$SCRIPT_DIR/moonbridge"
-GO_BIN=""
-for candidate in "$HOME/.local/go/bin/go" /usr/local/go/bin/go /usr/bin/go; do
-    if [ -x "$candidate" ]; then
-        GO_BIN="$candidate"
-        break
+chmod 600 "$SCRIPT_DIR/models.yaml"
+if [ ! -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    python3 -m venv "$SCRIPT_DIR/.venv"
+fi
+"$SCRIPT_DIR/.venv/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt" -c "$SCRIPT_DIR/constraints.txt"
+mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
+for command_name in llmrouter claude-mix clauder; do
+    destination="$HOME/.local/bin/$command_name"
+    if [ -e "$destination" ] && [ ! -L "$destination" ]; then
+        echo "No se reemplaza archivo ajeno: $destination" >&2
+        exit 1
+    fi
+    ln -sfn "$SCRIPT_DIR/$command_name" "$destination"
+done
+for command_name in codex-mix codexr; do
+    destination="$HOME/.local/bin/$command_name"
+    if [ -L "$destination" ] && [ "$(readlink "$destination")" = "$SCRIPT_DIR/$command_name" ]; then
+        rm "$destination"
     fi
 done
-
-if [ ! -x "$MOON_BIN" ]; then
-    if [ -z "$GO_BIN" ]; then
-        warn "Go no encontrado. Instalando Go 1.24 en ~/.local/go ..."
-        GO_TARBALL="/tmp/go.tar.gz"
-        curl -sL -o "$GO_TARBALL" https://go.dev/dl/go1.24.3.linux-amd64.tar.gz
-        mkdir -p "$HOME/.local"
-        tar -C "$HOME/.local" -xzf "$GO_TARBALL"
-        rm -f "$GO_TARBALL"
-        GO_BIN="$HOME/.local/go/bin/go"
-        info "Go instalado: $($GO_BIN version)"
-    fi
-
-    info "Compilando Moon Bridge ..."
-    MOON_TMPDIR="$(mktemp -d)"
-    export PATH="$HOME/.local/go/bin:$PATH"
-    git clone --depth 1 https://github.com/ZhiYi-R/moon-bridge.git "$MOON_TMPDIR"
-    (cd "$MOON_TMPDIR" && go build -o moonbridge ./cmd/moonbridge)
-    cp "$MOON_TMPDIR/moonbridge" "$MOON_BIN"
-    rm -rf "$MOON_TMPDIR"
-else
-    info "Moon Bridge ya existe: $MOON_BIN"
-fi
-
-# --- comandos en PATH ---
-TARGET_BIN=""
-for candidate in "$HOME/.local/bin" "$HOME/bin"; do
-    if echo ":$PATH:" | grep -q ":$candidate:"; then
-        TARGET_BIN="$candidate"
-        break
-    fi
-done
-
-if [ -z "$TARGET_BIN" ]; then
-    TARGET_BIN="$HOME/.local/bin"
-    mkdir -p "$TARGET_BIN"
-    warn "$TARGET_BIN no estaba en PATH. Agregalo a tu ~/.bashrc:"
-    warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
-
-for command_name in llmrouter claude-mix codex-mix codexr clauder; do
-    if [ -L "$TARGET_BIN/$command_name" ] || [ -f "$TARGET_BIN/$command_name" ]; then
-        info "$command_name ya existe en $TARGET_BIN, actualizando symlink."
-        rm -f "$TARGET_BIN/$command_name"
-    fi
-    ln -s "$SCRIPT_DIR/$command_name" "$TARGET_BIN/$command_name"
-    info "Symlink $command_name -> $TARGET_BIN/$command_name"
-done
-
-# --- systemd user service ---
-SYSTEMD_DIR="$HOME/.config/systemd/user"
-if command -v systemctl &>/dev/null && systemctl --user status &>/dev/null 2>&1; then
-    mkdir -p "$SYSTEMD_DIR"
-    SERVICE_SRC="$SCRIPT_DIR/systemd/llmrouter.service"
-    SERVICE_DST="$SYSTEMD_DIR/llmrouter.service"
-    if [ -f "$SERVICE_SRC" ]; then
-        cp "$SERVICE_SRC" "$SERVICE_DST"
-        systemctl --user disable claude-router 2>/dev/null || true
-        rm -f "$SYSTEMD_DIR/claude-router.service"
-        systemctl --user daemon-reload
-        info "Servicio systemd user instalado."
-    else
-        warn "No se encontro $SERVICE_SRC, saltando instalacion de servicio."
-    fi
-else
-    warn "systemctl --user no disponible. El router se manejara con scripts manuales."
-fi
-
-# --- resumen ---
-echo ""
-echo "========================================="
-echo "  LLMRouter - Instalacion completa"
-echo "========================================="
-echo ""
-echo "Archivos en: $SCRIPT_DIR"
-echo ""
-if [ "$MUST_EDIT" = "1" ]; then
-    echo -e "${RED}PROXIMO PASO OBLIGATORIO:${NC}"
-    echo "  1) Edita tus API keys y asigna los tiers:"
-    echo "     nano $MODELS_YAML"
-    echo ""
-fi
-echo "  2) Arranca el router:"
-echo "     $SCRIPT_DIR/start-router.sh"
-echo ""
-echo "  3) Prueba que funciona:"
-echo "     $SCRIPT_DIR/test-router.sh"
-echo ""
-echo "  4) Usa Claude Code con el router:"
-echo "     llmrouter-claude"
-echo ""
-echo "  5) Usa Codex CLI con el mismo router:"
-echo "     llmrouter-codex"
-echo ""
-echo "Comandos utiles:"
-echo "  start-router.sh    - arrancar"
-echo "  stop-router.sh     - detener"
-echo "  restart-router.sh  - reiniciar"
-echo "  status-router.sh   - ver estado"
-echo "  test-router.sh     - probar endpoints"
-echo "  llmrouter          - helper start/stop/status/test/claude/codex"
-echo "  llmrouter-claude   - lanzar Claude Code"
-echo "  llmrouter-codex    - lanzar Codex CLI"
-echo ""
-echo "Para cambiar modelos, edita $MODELS_YAML"
-echo "y reinicia con restart-router.sh"
-echo "========================================="
+cp "$SCRIPT_DIR/systemd/llmrouter.service" "$HOME/.config/systemd/user/llmrouter.service"
+systemctl --user daemon-reload
+echo "Instalado. Editar models.yaml y ejecutar llmrouter check; llmrouter start."
+echo "Si ya estaba activo, llmrouter restart aplica los cambios."
